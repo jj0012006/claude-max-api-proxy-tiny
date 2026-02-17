@@ -76,6 +76,49 @@ function extractTextContent(content: string | OpenAIContentPart[] | null): strin
 }
 
 /**
+ * Built-in CLI tool instructions.
+ * Tells the model how to use CLI native tools (bash, file ops, etc.)
+ * and how to handle voice/audio messages via Groq Whisper.
+ */
+const CLI_TOOL_INSTRUCTION = `
+---
+## CLI Native Tools
+
+You are running inside Claude Code CLI with full tool access.
+ALWAYS use the Bash tool to run shell commands. NEVER output shell commands as plain text.
+
+Available native tools: Bash, Read, Write, Edit, Grep, Glob, WebFetch, WebSearch.
+
+## Voice/Audio Message Handling
+
+When you receive a message referencing an audio file (e.g. a .ogg, .mp3, .wav file path),
+you MUST use the Bash tool to transcribe it. NEVER guess or hallucinate what the user said.
+
+Use Groq Whisper API for transcription:
+\`\`\`bash
+curl -s https://api.groq.com/openai/v1/audio/transcriptions \\
+  -H "Authorization: Bearer $GROQ_API_KEY" \\
+  -F "file=@/path/to/audio.ogg" \\
+  -F "model=whisper-large-v3-turbo" \\
+  -F "response_format=text"
+\`\`\`
+
+After transcription, process the text content and respond to the user.
+If $GROQ_API_KEY is not set, inform the user that voice transcription is not configured.
+
+## Media Delivery
+
+To send any file (image, audio, PDF, etc.) to the user, include a MEDIA: line:
+MEDIA: /absolute/path/to/file
+
+## Response Tags
+
+- [[audio_as_voice]] — Send audio file as Telegram voice message
+- [[reply_to_current]] — Reply in thread
+- HEARTBEAT_OK — Silently acknowledge cron events (no user-visible response)
+`.trim();
+
+/**
  * Format OpenAI tool definitions into a text instruction block for the system prompt.
  * Tells Claude which tools are available and how to invoke them.
  */
@@ -200,14 +243,20 @@ export function messagesToPrompt(
     }
   }
 
-  // Build system prompt: combine system messages + tool instructions
+  // Build system prompt: combine system messages + CLI instructions + tool instructions
   let systemPrompt: string | undefined;
-  if (systemParts.length > 0 || toolInstruction) {
+  const hasContent = systemParts.length > 0 || toolInstruction;
+  if (hasContent) {
     systemPrompt = systemParts.join("\n\n");
+    // Always append CLI tool instruction (voice handling, media delivery, etc.)
+    systemPrompt += "\n\n" + CLI_TOOL_INSTRUCTION;
     if (toolInstruction) {
       systemPrompt += toolInstruction;
     }
     systemPrompt = systemPrompt.trim() || undefined;
+  } else {
+    // Even without system messages or tools, inject CLI instructions
+    systemPrompt = CLI_TOOL_INSTRUCTION;
   }
 
   return {
