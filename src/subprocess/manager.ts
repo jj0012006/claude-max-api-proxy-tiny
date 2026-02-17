@@ -36,20 +36,36 @@ export interface SubprocessEvents {
   raw: (line: string) => void;
 }
 
-const DEFAULT_TIMEOUT = 300000; // 5 minutes
+// Activity timeout: 10 minutes of no output triggers kill
+const ACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
   private buffer: string = "";
-  private timeoutId: NodeJS.Timeout | null = null;
+  private activityTimeoutId: NodeJS.Timeout | null = null;
   private isKilled: boolean = false;
+
+  /**
+   * Reset the activity timeout. Called on each stdout data event.
+   * If no output is received for ACTIVITY_TIMEOUT_MS, the process is killed.
+   */
+  private resetActivityTimeout(): void {
+    this.clearTimeout();
+    this.activityTimeoutId = setTimeout(() => {
+      if (!this.isKilled) {
+        console.error(`[Subprocess] Activity timeout (${ACTIVITY_TIMEOUT_MS / 1000}s no output), killing process`);
+        this.isKilled = true;
+        this.process?.kill("SIGTERM");
+        this.emit("error", new Error(`No activity for ${ACTIVITY_TIMEOUT_MS / 1000} seconds, request timed out`));
+      }
+    }, ACTIVITY_TIMEOUT_MS);
+  }
 
   /**
    * Start the Claude CLI subprocess with the given prompt
    */
   async start(prompt: string, options: SubprocessOptions): Promise<void> {
     const args = this.buildArgs(prompt, options);
-    const timeout = options.timeout || DEFAULT_TIMEOUT;
 
     return new Promise((resolve, reject) => {
       try {
@@ -60,14 +76,8 @@ export class ClaudeSubprocess extends EventEmitter {
           stdio: ["pipe", "pipe", "pipe"],
         });
 
-        // Set timeout
-        this.timeoutId = setTimeout(() => {
-          if (!this.isKilled) {
-            this.isKilled = true;
-            this.process?.kill("SIGTERM");
-            this.emit("error", new Error(`Request timed out after ${timeout}ms`));
-          }
-        }, timeout);
+        // Start activity timeout
+        this.resetActivityTimeout();
 
         // Handle spawn errors (e.g., claude not found)
         this.process.on("error", (err) => {
@@ -92,6 +102,8 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.stdout?.on("data", (chunk: Buffer) => {
           const data = chunk.toString();
           console.error(`[Subprocess] Received ${data.length} bytes of stdout`);
+          // Reset activity timeout on each output
+          this.resetActivityTimeout();
           this.buffer += data;
           this.processBuffer();
         });
@@ -100,6 +112,8 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.stderr?.on("data", (chunk: Buffer) => {
           const errorText = chunk.toString().trim();
           if (errorText) {
+            // Reset activity timeout on stderr output too
+            this.resetActivityTimeout();
             // Don't emit as error unless it's actually an error
             // Claude CLI may write debug info to stderr
             console.error("[Subprocess stderr]:", errorText.slice(0, 200));
@@ -191,12 +205,12 @@ export class ClaudeSubprocess extends EventEmitter {
   }
 
   /**
-   * Clear the timeout timer
+   * Clear the activity timeout timer
    */
   private clearTimeout(): void {
-    if (this.timeoutId) {
-      clearTimeout(this.timeoutId);
-      this.timeoutId = null;
+    if (this.activityTimeoutId) {
+      clearTimeout(this.activityTimeoutId);
+      this.activityTimeoutId = null;
     }
   }
 
