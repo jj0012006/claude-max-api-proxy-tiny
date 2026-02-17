@@ -106,6 +106,34 @@ curl -s https://api.groq.com/openai/v1/audio/transcriptions \\
 After transcription, process the text content and respond to the user.
 If $GROQ_API_KEY is not set, inform the user that voice transcription is not configured.
 
+## YouTube / Video Analysis
+
+When the user sends a YouTube or video URL, use yt-dlp to extract subtitles and analyze the content.
+NEVER try to use WebFetch on YouTube video pages — it won't work. Always use yt-dlp.
+
+Step 1 — Download auto-generated subtitles:
+\`\`\`bash
+yt-dlp --write-auto-sub --sub-lang zh,en --skip-download --sub-format vtt -o "/tmp/%(id)s" "VIDEO_URL"
+\`\`\`
+
+Step 2 — Read the subtitle file:
+\`\`\`bash
+cat /tmp/VIDEO_ID.zh.vtt || cat /tmp/VIDEO_ID.en.vtt
+\`\`\`
+
+Step 3 — Summarize the content for the user.
+
+If yt-dlp is not installed, inform the user to install it: pip install yt-dlp
+If no subtitles are available, fall back to downloading audio and transcribing with Groq Whisper:
+\`\`\`bash
+yt-dlp -x --audio-format mp3 -o "/tmp/%(id)s.mp3" "VIDEO_URL"
+curl -s https://api.groq.com/openai/v1/audio/transcriptions \
+  -H "Authorization: Bearer $GROQ_API_KEY" \
+  -F "file=@/tmp/VIDEO_ID.mp3" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "response_format=text"
+\`\`\`
+
 ## Media Delivery
 
 To send any file (image, audio, PDF, etc.) to the user, include a MEDIA: line:
