@@ -21,6 +21,8 @@ import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 export interface SubprocessOptions {
   model: ClaudeModel;
   sessionId?: string;
+  resumeSessionId?: string;
+  systemPrompt?: string;
   cwd?: string;
   timeout?: number;
 }
@@ -136,13 +138,24 @@ export class ClaudeSubprocess extends EventEmitter {
       "--include-partial-messages", // Enable streaming chunks
       "--model",
       options.model, // Model alias (opus/sonnet/haiku)
-      "--no-session-persistence", // Don't save sessions
-      prompt, // Pass prompt as argument (more reliable than stdin)
+      // Session persistence enabled (no --no-session-persistence)
     ];
 
-    if (options.sessionId) {
+    // Session handling: --resume for continuing, --session-id for new conversations
+    // These must come BEFORE the -- end-of-flags marker
+    if (options.resumeSessionId) {
+      args.push("--resume", options.resumeSessionId);
+    } else if (options.sessionId) {
       args.push("--session-id", options.sessionId);
     }
+
+    // Pass system prompt as a native CLI flag (proper role separation)
+    if (options.systemPrompt) {
+      args.push("--system-prompt", options.systemPrompt);
+    }
+
+    // End of flags, start of positional args
+    args.push("--", prompt);
 
     return args;
   }

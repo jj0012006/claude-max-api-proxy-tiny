@@ -7,6 +7,7 @@
 import type { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
+import type { SubprocessOptions } from "../subprocess/manager.js";
 import { openaiToCli } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
@@ -15,6 +16,7 @@ import {
   parseToolCalls,
   buildToolCallChunks,
 } from "../adapter/cli-to-openai.js";
+import { sessionManager } from "../session/manager.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 
@@ -49,15 +51,28 @@ export async function handleChatCompletions(
     const cliInput = openaiToCli(body);
     const subprocess = new ClaudeSubprocess();
 
+    // Session persistence: look up or create a session for this conversation
+    const conversationId = body.user || requestId;
+    const existingSession = sessionManager.get(conversationId);
+    const resumeSessionId = existingSession?.claudeSessionId;
+    const claudeSessionId = sessionManager.getOrCreate(conversationId, cliInput.model);
+
+    // Build subprocess options with session and system prompt
+    const subprocessOpts = {
+      model: cliInput.model,
+      sessionId: claudeSessionId,
+      resumeSessionId,
+      systemPrompt: cliInput.systemPrompt,
+    };
+
     if (stream) {
       if (hasTools) {
-        // Buffer full response before deciding if it contains tool calls
-        await handleStreamingWithToolsResponse(req, res, subprocess, cliInput, requestId);
+        await handleStreamingWithToolsResponse(req, res, subprocess, subprocessOpts, cliInput.prompt, requestId);
       } else {
-        await handleStreamingResponse(req, res, subprocess, cliInput, requestId);
+        await handleStreamingResponse(req, res, subprocess, subprocessOpts, cliInput.prompt, requestId);
       }
     } else {
-      await handleNonStreamingResponse(res, subprocess, cliInput, requestId, hasTools);
+      await handleNonStreamingResponse(res, subprocess, subprocessOpts, cliInput.prompt, requestId, hasTools);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -86,7 +101,8 @@ async function handleStreamingResponse(
   req: Request,
   res: Response,
   subprocess: ClaudeSubprocess,
-  cliInput: ReturnType<typeof openaiToCli>,
+  options: SubprocessOptions,
+  prompt: string,
   requestId: string
 ): Promise<void> {
   // Set SSE headers
@@ -185,10 +201,7 @@ async function handleStreamingResponse(
     });
 
     // Start the subprocess
-    subprocess.start(cliInput.prompt, {
-      model: cliInput.model,
-      sessionId: cliInput.sessionId,
-    }).catch((err) => {
+    subprocess.start(prompt, options).catch((err) => {
       console.error("[Streaming] Subprocess start error:", err);
       reject(err);
     });
@@ -209,7 +222,8 @@ async function handleStreamingWithToolsResponse(
   req: Request,
   res: Response,
   subprocess: ClaudeSubprocess,
-  cliInput: ReturnType<typeof openaiToCli>,
+  options: SubprocessOptions,
+  prompt: string,
   requestId: string
 ): Promise<void> {
   // Set SSE headers
@@ -312,10 +326,7 @@ async function handleStreamingWithToolsResponse(
       resolve();
     });
 
-    subprocess.start(cliInput.prompt, {
-      model: cliInput.model,
-      sessionId: cliInput.sessionId,
-    }).catch((err) => {
+    subprocess.start(prompt, options).catch((err) => {
       console.error("[StreamingWithTools] Subprocess start error:", err);
       reject(err);
     });
@@ -328,7 +339,8 @@ async function handleStreamingWithToolsResponse(
 async function handleNonStreamingResponse(
   res: Response,
   subprocess: ClaudeSubprocess,
-  cliInput: ReturnType<typeof openaiToCli>,
+  options: SubprocessOptions,
+  prompt: string,
   requestId: string,
   hasTools: boolean = false
 ): Promise<void> {
@@ -372,10 +384,7 @@ async function handleNonStreamingResponse(
 
     // Start the subprocess
     subprocess
-      .start(cliInput.prompt, {
-        model: cliInput.model,
-        sessionId: cliInput.sessionId,
-      })
+      .start(prompt, options)
       .catch((error) => {
         res.status(500).json({
           error: {

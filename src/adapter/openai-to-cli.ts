@@ -13,6 +13,7 @@ export type ClaudeModel = "opus" | "sonnet" | "haiku";
 
 export interface CliInput {
   prompt: string;
+  systemPrompt?: string;
   model: ClaudeModel;
   sessionId?: string;
 }
@@ -144,19 +145,25 @@ function formatAssistantWithToolCalls(msg: OpenAIChatMessage): string {
   return `<previous_response>\n${parts.join("\n")}\n</previous_response>\n`;
 }
 
+export interface ConvertedMessages {
+  prompt: string;
+  systemPrompt?: string;
+}
+
 /**
- * Convert OpenAI messages array to a single prompt string for Claude CLI
+ * Convert OpenAI messages array to a prompt string and a separate system prompt.
  *
- * Claude Code CLI in --print mode expects a single prompt, not a conversation.
- * We format the messages into a readable format that preserves context.
+ * System messages are extracted and returned as `systemPrompt` so they can be
+ * passed to CLI via `--system-prompt` (proper role separation).
+ * All other messages are formatted into the prompt text.
  */
 export function messagesToPrompt(
   messages: OpenAIChatRequest["messages"],
   tools?: OpenAITool[],
   toolChoice?: OpenAIChatRequest["tool_choice"]
-): string {
-  const parts: string[] = [];
-  let hasSystemMessage = false;
+): ConvertedMessages {
+  const systemParts: string[] = [];
+  const promptParts: string[] = [];
   const toolInstruction = tools && tools.length > 0
     ? formatToolsForPrompt(tools, toolChoice)
     : "";
@@ -164,23 +171,20 @@ export function messagesToPrompt(
   for (const msg of messages) {
     switch (msg.role) {
       case "system": {
-        hasSystemMessage = true;
-        const text = extractTextContent(msg.content);
-        // Append tool instructions to the system message
-        parts.push(`<system>\n${text}${toolInstruction}\n</system>\n`);
+        systemParts.push(extractTextContent(msg.content));
         break;
       }
 
       case "user":
-        parts.push(extractTextContent(msg.content));
+        promptParts.push(extractTextContent(msg.content));
         break;
 
       case "assistant":
         if (msg.tool_calls && msg.tool_calls.length > 0) {
-          parts.push(formatAssistantWithToolCalls(msg));
+          promptParts.push(formatAssistantWithToolCalls(msg));
         } else {
           const text = extractTextContent(msg.content);
-          parts.push(`<previous_response>\n${text}\n</previous_response>\n`);
+          promptParts.push(`<previous_response>\n${text}\n</previous_response>\n`);
         }
         break;
 
@@ -188,7 +192,7 @@ export function messagesToPrompt(
         const toolName = msg.name || "unknown";
         const toolCallId = msg.tool_call_id || "unknown";
         const result = extractTextContent(msg.content);
-        parts.push(
+        promptParts.push(
           `<tool_result name="${toolName}" tool_call_id="${toolCallId}">\n${result}\n</tool_result>\n`
         );
         break;
@@ -196,20 +200,30 @@ export function messagesToPrompt(
     }
   }
 
-  // If tools are provided but there was no system message, inject one
-  if (toolInstruction && !hasSystemMessage) {
-    parts.unshift(`<system>${toolInstruction}\n</system>\n`);
+  // Build system prompt: combine system messages + tool instructions
+  let systemPrompt: string | undefined;
+  if (systemParts.length > 0 || toolInstruction) {
+    systemPrompt = systemParts.join("\n\n");
+    if (toolInstruction) {
+      systemPrompt += toolInstruction;
+    }
+    systemPrompt = systemPrompt.trim() || undefined;
   }
 
-  return parts.join("\n").trim();
+  return {
+    prompt: promptParts.join("\n").trim(),
+    systemPrompt,
+  };
 }
 
 /**
  * Convert OpenAI chat request to CLI input format
  */
 export function openaiToCli(request: OpenAIChatRequest): CliInput {
+  const converted = messagesToPrompt(request.messages, request.tools, request.tool_choice);
   return {
-    prompt: messagesToPrompt(request.messages, request.tools, request.tool_choice),
+    prompt: converted.prompt,
+    systemPrompt: converted.systemPrompt,
     model: extractModel(request.model),
     sessionId: request.user, // Use OpenAI's user field for session mapping
   };
