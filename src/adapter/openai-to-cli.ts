@@ -4,9 +4,7 @@
 
 import type {
   OpenAIChatRequest,
-  OpenAIChatMessage,
   OpenAIContentPart,
-  OpenAITool,
 } from "../types/openai.js";
 
 export type ClaudeModel = "opus" | "sonnet" | "haiku";
@@ -16,6 +14,7 @@ export interface CliInput {
   systemPrompt?: string;
   model: ClaudeModel;
   sessionId?: string;
+  isResuming: boolean;
 }
 
 const MODEL_MAP: Record<string, ClaudeModel> = {
@@ -27,6 +26,14 @@ const MODEL_MAP: Record<string, ClaudeModel> = {
   "claude-code-cli/claude-opus-4": "opus",
   "claude-code-cli/claude-sonnet-4": "sonnet",
   "claude-code-cli/claude-haiku-4": "haiku",
+  // With maxproxy prefix
+  "maxproxy/claude-opus-4": "opus",
+  "maxproxy/claude-sonnet-4": "sonnet",
+  "maxproxy/claude-haiku-4": "haiku",
+  // With claude-max prefix
+  "claude-max/claude-opus-4": "opus",
+  "claude-max/claude-sonnet-4": "sonnet",
+  "claude-max/claude-haiku-4": "haiku",
   // Aliases
   "opus": "opus",
   "sonnet": "sonnet",
@@ -42,11 +49,16 @@ export function extractModel(model: string): ClaudeModel {
     return MODEL_MAP[model];
   }
 
-  // Try stripping provider prefix
-  const stripped = model.replace(/^claude-code-cli\//, "");
+  // Try stripping provider prefix (any prefix before /)
+  const stripped = model.replace(/^[^/]+\//, "");
   if (MODEL_MAP[stripped]) {
     return MODEL_MAP[stripped];
   }
+
+  // Try matching full Claude model names (e.g., claude-sonnet-4-5-20250929)
+  if (model.includes("opus")) return "opus";
+  if (model.includes("sonnet")) return "sonnet";
+  if (model.includes("haiku")) return "haiku";
 
   // Default to opus (Claude Max subscription)
   return "opus";
@@ -73,6 +85,87 @@ function extractTextContent(content: string | OpenAIContentPart[] | null): strin
   }
 
   return String(content ?? "");
+}
+
+/**
+ * XML tool tag patterns used by Claude CLI in assistant messages.
+ * These are internal tool execution results that should not be sent
+ * back to the CLI in conversation history.
+ */
+const TOOL_TAG_PATTERNS = [
+  // Bash tool
+  { pattern: /<Bash>[\s\S]*?<\/Bash>/g, label: "Ran command" },
+  // Read/Write/Edit tools
+  { pattern: /<read>[\s\S]*?<\/read>/g, label: "Read file" },
+  { pattern: /<write>[\s\S]*?<\/write>/g, label: "Wrote file" },
+  { pattern: /<edit>[\s\S]*?<\/edit>/g, label: "Edited file" },
+  // Browser/Web tools
+  { pattern: /<browser>[\s\S]*?<\/browser>/g, label: "Browsed web" },
+  { pattern: /<WebFetch>[\s\S]*?<\/WebFetch>/g, label: "Fetched URL" },
+  { pattern: /<WebSearch>[\s\S]*?<\/WebSearch>/g, label: "Web search" },
+  // Platform tools
+  { pattern: /<Message>[\s\S]*?<\/Message>/g, label: "Sent message" },
+  { pattern: /<Cron>[\s\S]*?<\/Cron>/g, label: "Cron task" },
+  { pattern: /<Canvas>[\s\S]*?<\/Canvas>/g, label: "Canvas" },
+  { pattern: /<Sessions>[\s\S]*?<\/Sessions>/g, label: "Sessions" },
+  // Generic tool_use XML blocks
+  { pattern: /<tool_use>[\s\S]*?<\/tool_use>/g, label: "Tool use" },
+  // Antml function calls
+  { pattern: /<function_calls>[\s\S]*?<\/antml:function_calls>/g, label: "Tool use" },
+];
+
+/**
+ * Clean assistant message content by removing XML tool patterns.
+ * Replaces tool blocks with short summaries to keep context concise.
+ */
+export function cleanAssistantContent(text: string): string {
+  let cleaned = text;
+  const summaries: string[] = [];
+
+  for (const { pattern, label } of TOOL_TAG_PATTERNS) {
+    const matches = cleaned.match(pattern);
+    if (matches) {
+      for (const _match of matches) {
+        summaries.push(`[${label}]`);
+      }
+      cleaned = cleaned.replace(pattern, "");
+    }
+  }
+
+  // Collapse 4+ consecutive summaries
+  if (summaries.length >= 4) {
+    cleaned = cleaned.trim();
+    if (cleaned) {
+      cleaned += `\n[Executed ${summaries.length} tool operations]`;
+    } else {
+      cleaned = `[Executed ${summaries.length} tool operations]`;
+    }
+  } else if (summaries.length > 0) {
+    cleaned = cleaned.trim();
+    const summaryText = summaries.join(" ");
+    if (cleaned) {
+      cleaned += `\n${summaryText}`;
+    } else {
+      cleaned = summaryText;
+    }
+  }
+
+  return cleaned.trim();
+}
+
+/**
+ * Extract the latest user message text from the messages array.
+ * Used when resuming an existing session (we only need the new message).
+ */
+export function extractLatestUserMessage(
+  messages: OpenAIChatRequest["messages"]
+): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      return extractTextContent(messages[i].content);
+    }
+  }
+  return "";
 }
 
 /**
@@ -127,10 +220,10 @@ If yt-dlp is not installed, inform the user to install it: pip install yt-dlp
 If no subtitles are available, fall back to downloading audio and transcribing with Groq Whisper:
 \`\`\`bash
 yt-dlp -x --audio-format mp3 -o "/tmp/%(id)s.mp3" "VIDEO_URL"
-curl -s https://api.groq.com/openai/v1/audio/transcriptions \
-  -H "Authorization: Bearer $GROQ_API_KEY" \
-  -F "file=@/tmp/VIDEO_ID.mp3" \
-  -F "model=whisper-large-v3-turbo" \
+curl -s https://api.groq.com/openai/v1/audio/transcriptions \\
+  -H "Authorization: Bearer $GROQ_API_KEY" \\
+  -F "file=@/tmp/VIDEO_ID.mp3" \\
+  -F "model=whisper-large-v3-turbo" \\
   -F "response_format=text"
 \`\`\`
 
@@ -146,76 +239,6 @@ MEDIA: /absolute/path/to/file
 - HEARTBEAT_OK — Silently acknowledge cron events (no user-visible response)
 `.trim();
 
-/**
- * Format OpenAI tool definitions into a text instruction block for the system prompt.
- * Tells Claude which tools are available and how to invoke them.
- */
-function formatToolsForPrompt(
-  tools: OpenAITool[],
-  toolChoice?: OpenAIChatRequest["tool_choice"]
-): string {
-  const lines: string[] = [
-    "",
-    "---",
-    "You have the following tools available:",
-    "",
-  ];
-
-  for (const tool of tools) {
-    const fn = tool.function;
-    lines.push(`### ${fn.name}`);
-    if (fn.description) {
-      lines.push(`Description: ${fn.description}`);
-    }
-    if (fn.parameters) {
-      lines.push(`Parameters: ${JSON.stringify(fn.parameters)}`);
-    }
-    lines.push("");
-  }
-
-  lines.push(
-    "When you need to use a tool, output EXACTLY this format (do NOT wrap in markdown code blocks):",
-    "",
-    "<tool_call>",
-    '{"name": "tool_name", "arguments": {"param1": "value1"}}',
-    "</tool_call>",
-    "",
-    "Rules:",
-    "- You may output multiple <tool_call> blocks if you need to call multiple tools.",
-    "- Put any explanatory text BEFORE the <tool_call> block(s).",
-    "- The JSON inside <tool_call> must be valid JSON with \"name\" and \"arguments\" fields.",
-    "- If you don't need to use any tool, respond normally without <tool_call>.",
-  );
-
-  // Handle tool_choice
-  if (toolChoice === "none") {
-    lines.push("- IMPORTANT: Do NOT use any tools in this response. Respond with text only.");
-  } else if (toolChoice === "required") {
-    lines.push("- IMPORTANT: You MUST use at least one tool in this response.");
-  } else if (typeof toolChoice === "object" && toolChoice?.type === "function") {
-    lines.push(`- IMPORTANT: You MUST use the tool "${toolChoice.function.name}" in this response.`);
-  }
-
-  return lines.join("\n");
-}
-
-/**
- * Format an assistant message that contains tool_calls for inclusion in the prompt.
- */
-function formatAssistantWithToolCalls(msg: OpenAIChatMessage): string {
-  const parts: string[] = [];
-  const text = extractTextContent(msg.content);
-  if (text) {
-    parts.push(text);
-  }
-  if (msg.tool_calls) {
-    for (const tc of msg.tool_calls) {
-      parts.push(`[Called tool: ${tc.function.name} with arguments: ${tc.function.arguments}]`);
-    }
-  }
-  return `<previous_response>\n${parts.join("\n")}\n</previous_response>\n`;
-}
-
 export interface ConvertedMessages {
   prompt: string;
   systemPrompt?: string;
@@ -229,17 +252,15 @@ export interface ConvertedMessages {
  * All other messages are formatted into the prompt text.
  */
 export function messagesToPrompt(
-  messages: OpenAIChatRequest["messages"],
-  tools?: OpenAITool[],
-  toolChoice?: OpenAIChatRequest["tool_choice"]
+  messages: OpenAIChatRequest["messages"]
 ): ConvertedMessages {
   const systemParts: string[] = [];
   const promptParts: string[] = [];
-  const toolInstruction = tools && tools.length > 0
-    ? formatToolsForPrompt(tools, toolChoice)
-    : "";
 
   for (const msg of messages) {
+    // Skip tool result messages
+    if (msg.role === "tool") continue;
+
     switch (msg.role) {
       case "system": {
         systemParts.push(extractTextContent(msg.content));
@@ -250,40 +271,28 @@ export function messagesToPrompt(
         promptParts.push(extractTextContent(msg.content));
         break;
 
-      case "assistant":
-        if (msg.tool_calls && msg.tool_calls.length > 0) {
-          promptParts.push(formatAssistantWithToolCalls(msg));
-        } else {
-          const text = extractTextContent(msg.content);
-          promptParts.push(`<previous_response>\n${text}\n</previous_response>\n`);
-        }
-        break;
+      case "assistant": {
+        // Skip assistant messages that only have tool_calls and no text content
+        if ((msg as unknown as Record<string, unknown>).tool_calls && !msg.content) continue;
 
-      case "tool": {
-        const toolName = msg.name || "unknown";
-        const toolCallId = msg.tool_call_id || "unknown";
-        const result = extractTextContent(msg.content);
-        promptParts.push(
-          `<tool_result name="${toolName}" tool_call_id="${toolCallId}">\n${result}\n</tool_result>\n`
-        );
+        const text = extractTextContent(msg.content);
+        if (!text.trim()) continue;
+
+        // Clean XML tool patterns from assistant content
+        const cleaned = cleanAssistantContent(text);
+        if (cleaned) {
+          promptParts.push(`<previous_response>\n${cleaned}\n</previous_response>\n`);
+        }
         break;
       }
     }
   }
 
-  // Build system prompt: combine system messages + CLI instructions + tool instructions
+  // Build system prompt: combine system messages + CLI instructions
   let systemPrompt: string | undefined;
-  const hasContent = systemParts.length > 0 || toolInstruction;
-  if (hasContent) {
-    systemPrompt = systemParts.join("\n\n");
-    // Always append CLI tool instruction (voice handling, media delivery, etc.)
-    systemPrompt += "\n\n" + CLI_TOOL_INSTRUCTION;
-    if (toolInstruction) {
-      systemPrompt += toolInstruction;
-    }
-    systemPrompt = systemPrompt.trim() || undefined;
+  if (systemParts.length > 0) {
+    systemPrompt = systemParts.join("\n\n") + "\n\n" + CLI_TOOL_INSTRUCTION;
   } else {
-    // Even without system messages or tools, inject CLI instructions
     systemPrompt = CLI_TOOL_INSTRUCTION;
   }
 
@@ -295,13 +304,34 @@ export function messagesToPrompt(
 
 /**
  * Convert OpenAI chat request to CLI input format
+ *
+ * When hasExistingSession is true, we only send the latest user message
+ * as the prompt (the CLI already has the conversation context from the session),
+ * and we skip the system prompt (already set in the existing session).
  */
-export function openaiToCli(request: OpenAIChatRequest): CliInput {
-  const converted = messagesToPrompt(request.messages, request.tools, request.tool_choice);
+export function openaiToCli(
+  request: OpenAIChatRequest,
+  hasExistingSession: boolean = false
+): CliInput {
+  if (hasExistingSession) {
+    // Resuming an existing session: only send the latest user message
+    const latestMessage = extractLatestUserMessage(request.messages);
+    return {
+      prompt: latestMessage,
+      systemPrompt: undefined, // CLI already has system prompt from session
+      model: extractModel(request.model),
+      sessionId: request.user,
+      isResuming: true,
+    };
+  }
+
+  // New session: send full conversation context
+  const converted = messagesToPrompt(request.messages);
   return {
     prompt: converted.prompt,
     systemPrompt: converted.systemPrompt,
     model: extractModel(request.model),
-    sessionId: request.user, // Use OpenAI's user field for session mapping
+    sessionId: request.user,
+    isResuming: false,
   };
 }

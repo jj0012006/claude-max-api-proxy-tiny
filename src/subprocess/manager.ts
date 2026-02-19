@@ -9,6 +9,7 @@ import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 import fs from "fs/promises";
 import path from "path";
+import os from "os";
 import type {
   ClaudeCliMessage,
   ClaudeCliAssistant,
@@ -34,7 +35,16 @@ export interface SubprocessEvents {
   error: (error: Error) => void;
   close: (code: number | null) => void;
   raw: (line: string) => void;
+  resume_failed: (sessionId: string) => void;
 }
+
+// Keywords that indicate resume failure
+const RESUME_FAILURE_KEYWORDS = [
+  "Failed to resume",
+  "Session not found",
+  "--resume requires",
+  "Could not find session",
+];
 
 // Activity timeout: 10 minutes of no output triggers kill
 const ACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -62,16 +72,37 @@ export class ClaudeSubprocess extends EventEmitter {
   }
 
   /**
+   * Get the stable working directory for subprocess execution
+   */
+  private static getStableCwd(): string {
+    const cwd = process.env.PROXY_CWD || path.join(os.homedir(), ".openclaw", "workspace");
+    return cwd;
+  }
+
+  /**
+   * Ensure the working directory exists
+   */
+  private static async ensureCwd(cwd: string): Promise<void> {
+    try {
+      await fs.mkdir(cwd, { recursive: true });
+    } catch {
+      // Ignore errors (e.g., already exists)
+    }
+  }
+
+  /**
    * Start the Claude CLI subprocess with the given prompt
    */
   async start(prompt: string, options: SubprocessOptions): Promise<void> {
     const args = this.buildArgs(prompt, options);
+    const cwd = options.cwd || ClaudeSubprocess.getStableCwd();
+    await ClaudeSubprocess.ensureCwd(cwd);
 
     return new Promise((resolve, reject) => {
       try {
         // Use spawn() for security - no shell interpretation
         this.process = spawn("claude", args, {
-          cwd: options.cwd || process.cwd(),
+          cwd,
           env: { ...process.env },
           stdio: ["pipe", "pipe", "pipe"],
         });
@@ -108,7 +139,7 @@ export class ClaudeSubprocess extends EventEmitter {
           this.processBuffer();
         });
 
-        // Capture stderr for debugging
+        // Capture stderr for debugging and resume failure detection
         this.process.stderr?.on("data", (chunk: Buffer) => {
           const errorText = chunk.toString().trim();
           if (errorText) {
@@ -116,7 +147,18 @@ export class ClaudeSubprocess extends EventEmitter {
             this.resetActivityTimeout();
             // Don't emit as error unless it's actually an error
             // Claude CLI may write debug info to stderr
-            console.error("[Subprocess stderr]:", errorText.slice(0, 200));
+            console.error("[Subprocess stderr]:", errorText.slice(0, 500));
+
+            // Check for resume failure keywords
+            if (options.resumeSessionId) {
+              for (const keyword of RESUME_FAILURE_KEYWORDS) {
+                if (errorText.includes(keyword)) {
+                  console.error(`[Subprocess] Resume failed for session: ${options.resumeSessionId}`);
+                  this.emit("resume_failed", options.resumeSessionId);
+                  break;
+                }
+              }
+            }
           }
         });
 

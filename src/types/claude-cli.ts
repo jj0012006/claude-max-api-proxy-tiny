@@ -100,8 +100,11 @@ export interface ClaudeCliStreamEvent {
       text: string;
     };
     content_block?: {
-      type: "text";
-      text: string;
+      type: "text" | "tool_use";
+      text?: string;
+      id?: string;
+      name?: string;
+      input?: unknown;
     };
     message?: {
       model: string;
@@ -142,6 +145,14 @@ export function isStreamEvent(msg: ClaudeCliMessage): msg is ClaudeCliStreamEven
 
 export function isContentDelta(msg: ClaudeCliMessage): msg is ClaudeCliStreamEvent {
   return isStreamEvent(msg) && msg.event.type === "content_block_delta";
+}
+
+export function isMessageStart(msg: ClaudeCliMessage): msg is ClaudeCliStreamEvent {
+  return isStreamEvent(msg) && msg.event.type === "message_start";
+}
+
+export function isContentBlockStart(msg: ClaudeCliMessage): msg is ClaudeCliStreamEvent {
+  return isStreamEvent(msg) && msg.event.type === "content_block_start";
 }
 
 export function isSystemInit(msg: ClaudeCliMessage): msg is ClaudeCliInit {

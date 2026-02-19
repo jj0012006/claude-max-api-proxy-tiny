@@ -15,6 +15,7 @@ export interface SessionMapping {
   createdAt: number;
   lastUsedAt: number;
   model: string;
+  messageCount: number;
 }
 
 const SESSION_FILE = path.join(
@@ -77,6 +78,7 @@ class SessionManager {
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       model,
+      messageCount: 0,
     };
 
     this.sessions.set(clawdbotId, mapping);
@@ -97,6 +99,32 @@ class SessionManager {
    */
   get(clawdbotId: string): SessionMapping | undefined {
     return this.sessions.get(clawdbotId);
+  }
+
+  /**
+   * Increment message count for a session
+   */
+  incrementMessageCount(clawdbotId: string): void {
+    const existing = this.sessions.get(clawdbotId);
+    if (existing) {
+      existing.messageCount = (existing.messageCount || 0) + 1;
+    }
+  }
+
+  /**
+   * Invalidate (delete) a session mapping — used when resume fails
+   */
+  invalidate(clawdbotId: string): void {
+    const existing = this.sessions.get(clawdbotId);
+    if (existing) {
+      console.log(
+        `[SessionManager] Invalidated session: ${clawdbotId} -> ${existing.claudeSessionId}`
+      );
+      this.sessions.delete(clawdbotId);
+      this.save().catch((err) =>
+        console.error("[SessionManager] Save error:", err)
+      );
+    }
   }
 
   /**
