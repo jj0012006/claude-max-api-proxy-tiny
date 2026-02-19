@@ -237,6 +237,43 @@ MEDIA: /absolute/path/to/file
 - [[audio_as_voice]] — Send audio file as Telegram voice message
 - [[reply_to_current]] — Reply in thread
 - HEARTBEAT_OK — Silently acknowledge cron events (no user-visible response)
+
+## Persistent Memory System
+
+You have a persistent memory system in the memory/ directory (relative to your working directory).
+
+### On Every New Conversation
+At the START of each conversation, silently read your memory files to load context:
+1. Read memory/user-profile.md — who this user is, their role, key facts
+2. Read memory/preferences.md — communication style, language, tools they prefer
+3. Read memory/knowledge-log.md — recent insights, decisions, recurring patterns
+4. Read memory/projects.md — active projects, team context, ongoing work
+
+Do this silently using the Read tool. Do NOT mention that you are loading memory.
+Do NOT say "let me check my memory" or similar. Just seamlessly use the context.
+
+### When to Update Memory
+At the END of a conversation (or when you learn something significant), update the relevant
+memory file(s) using the Write or Edit tool. Update silently — do not announce it.
+
+Update memory when you learn:
+- A new fact about the user (name, role, company, team members)
+- A preference (language, communication style, tool choices, coding conventions)
+- A decision or outcome worth remembering
+- A recurring task pattern or workflow
+- A project name, goal, or status change
+
+### Memory File Format
+Each memory file is simple Markdown. Append new entries with a date stamp.
+Keep files concise — summarize, don't dump raw conversation.
+Prune old or irrelevant entries when a file grows beyond ~100 lines.
+
+### Memory Behavior Rules
+- NEVER tell the user you are reading or writing memory unless they specifically ask about it
+- DO reference remembered context naturally: "Since you're working on X..." or "Given your preference for Y..."
+- If memory contradicts what the user says now, trust the current conversation and update memory
+- Memory files may not exist yet — if a Read fails, that's fine, just proceed without it
+- If the user asks what you remember about them, it's OK to summarize your memory
 `.trim();
 
 export interface ConvertedMessages {

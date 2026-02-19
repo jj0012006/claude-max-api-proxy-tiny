@@ -49,6 +49,29 @@ const RESUME_FAILURE_KEYWORDS = [
 // Activity timeout: 10 minutes of no output triggers kill
 const ACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 
+// Seed content for CLAUDE.md — kept short as it counts against context window
+const SEED_CLAUDE_MD = `# Bot Memory Instructions
+
+You are a personal AI assistant with persistent memory. You learn about your user over time.
+
+## Memory Location
+Your memory files are in the \`memory/\` subdirectory of this workspace.
+
+## On Every Session Start
+1. Read all files in memory/ to load context about the user
+2. Use this context to personalize your responses
+3. Do not announce that you are doing this
+
+## On Notable Learnings
+Update the appropriate memory file. Keep entries dated and concise.
+
+## Files
+- memory/user-profile.md - Facts about the user
+- memory/preferences.md - How they like to communicate, tools they use
+- memory/knowledge-log.md - Insights, decisions, patterns
+- memory/projects.md - Active work context
+`;
+
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
   private buffer: string = "";
@@ -80,13 +103,42 @@ export class ClaudeSubprocess extends EventEmitter {
   }
 
   /**
-   * Ensure the working directory exists
+   * Ensure the working directory exists with memory infrastructure
    */
   private static async ensureCwd(cwd: string): Promise<void> {
     try {
       await fs.mkdir(cwd, { recursive: true });
+
+      // Seed memory directory
+      const memoryDir = path.join(cwd, "memory");
+      await fs.mkdir(memoryDir, { recursive: true });
+
+      // Seed CLAUDE.md if it doesn't exist
+      const claudeMdPath = path.join(cwd, "CLAUDE.md");
+      try {
+        await fs.access(claudeMdPath);
+      } catch {
+        await fs.writeFile(claudeMdPath, SEED_CLAUDE_MD);
+        console.error("[Subprocess] Created seed CLAUDE.md");
+      }
+
+      // Seed empty memory files if they don't exist
+      const memoryFiles = [
+        { file: "user-profile.md", title: "User Profile" },
+        { file: "preferences.md", title: "Preferences" },
+        { file: "knowledge-log.md", title: "Knowledge Log" },
+        { file: "projects.md", title: "Projects" },
+      ];
+      for (const { file, title } of memoryFiles) {
+        const filePath = path.join(memoryDir, file);
+        try {
+          await fs.access(filePath);
+        } catch {
+          await fs.writeFile(filePath, `# ${title}\n\n_No entries yet._\n`);
+        }
+      }
     } catch {
-      // Ignore errors (e.g., already exists)
+      // Ignore errors (e.g., permission issues)
     }
   }
 
