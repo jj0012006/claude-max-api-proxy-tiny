@@ -6,6 +6,7 @@
  */
 
 import { config } from "../config.js";
+import { statsCollector } from "../server/stats.js";
 
 export type RouteDecision = "claude" | "gemini";
 
@@ -66,6 +67,7 @@ export async function routeRequest(userMessage: string): Promise<RouteDecision> 
 
     if (!response.ok) {
       console.error(`[Router] LiteLLM returned ${response.status}, falling back to claude`);
+      statsCollector.recordRouterFallback();
       return "claude";
     }
 
@@ -85,6 +87,7 @@ export async function routeRequest(userMessage: string): Promise<RouteDecision> 
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`[Router] Error: ${message}, falling back to claude`);
+    statsCollector.recordRouterError();
     return "claude";
   }
 }

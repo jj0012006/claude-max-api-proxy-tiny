@@ -21,6 +21,7 @@ import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent, ClaudeCliMessage } from "../types/claude-cli.js";
 import { isMessageStart, isContentBlockStart } from "../types/claude-cli.js";
 import { routeRequest, getExplicitProvider } from "../router/index.js";
+import { statsCollector } from "./stats.js";
 import { handleGeminiStreaming, handleGeminiNonStreaming } from "../provider/gemini.js";
 import { extractLatestUserMessage } from "../adapter/openai-to-cli.js";
 
@@ -50,6 +51,10 @@ export async function handleChatCompletions(
       return;
     }
 
+    const { messages, tools, ...topFields } = body as unknown as Record<string, unknown>;
+    console.error(`[Request] Top fields: ${JSON.stringify(topFields)}`);
+    console.error(`[Request] messages count: ${Array.isArray(messages) ? (messages as unknown[]).length : 0}, tools count: ${Array.isArray(tools) ? (tools as unknown[]).length : 0}`);
+
     // --- Routing: decide which provider handles this request ---
     const explicitProvider = getExplicitProvider(body.model);
     let provider = explicitProvider;
@@ -62,6 +67,7 @@ export async function handleChatCompletions(
 
     // --- Gemini path ---
     if (provider === "gemini") {
+      statsCollector.recordRequest("gemini");
       console.error(`[Route] → Gemini (model: ${body.model})`);
       if (stream) {
         await handleGeminiStreaming(res, body.messages, body.model, requestId);
@@ -72,6 +78,7 @@ export async function handleChatCompletions(
     }
 
     // --- Claude path (existing flow) ---
+    statsCollector.recordRequest("claude");
     console.error(`[Route] → Claude (model: ${body.model})`);
 
     // Session persistence: look up or create a session for this conversation

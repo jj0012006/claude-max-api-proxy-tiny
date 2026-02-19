@@ -12,6 +12,8 @@ export interface ProxyConfig {
   routerEnabled: boolean;
   /** Default Gemini model when router picks gemini */
   geminiDefaultModel: string;
+  /** OpenClaw gateway base URL for health checks */
+  openclawBaseUrl: string;
 }
 
 export function loadConfig(): ProxyConfig {
@@ -20,6 +22,7 @@ export function loadConfig(): ProxyConfig {
     routerModel: process.env.ROUTER_MODEL || "gemini-flash",
     routerEnabled: process.env.ROUTER_ENABLED !== "false",
     geminiDefaultModel: process.env.GEMINI_DEFAULT_MODEL || "gemini-pro",
+    openclawBaseUrl: process.env.OPENCLAW_BASE_URL || "http://127.0.0.1:18789",
   };
 }
 
