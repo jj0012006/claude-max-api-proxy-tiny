@@ -20,6 +20,9 @@ import { sessionManager } from "../session/manager.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent, ClaudeCliMessage } from "../types/claude-cli.js";
 import { isMessageStart, isContentBlockStart } from "../types/claude-cli.js";
+import { routeRequest, getExplicitProvider } from "../router/index.js";
+import { handleGeminiStreaming, handleGeminiNonStreaming } from "../provider/gemini.js";
+import { extractLatestUserMessage } from "../adapter/openai-to-cli.js";
 
 /**
  * Handle POST /v1/chat/completions
@@ -46,6 +49,30 @@ export async function handleChatCompletions(
       });
       return;
     }
+
+    // --- Routing: decide which provider handles this request ---
+    const explicitProvider = getExplicitProvider(body.model);
+    let provider = explicitProvider;
+
+    if (!provider) {
+      // model is "auto" or unrecognized — use intelligent routing
+      const latestMsg = extractLatestUserMessage(body.messages);
+      provider = await routeRequest(latestMsg);
+    }
+
+    // --- Gemini path ---
+    if (provider === "gemini") {
+      console.error(`[Route] → Gemini (model: ${body.model})`);
+      if (stream) {
+        await handleGeminiStreaming(res, body.messages, body.model, requestId);
+      } else {
+        await handleGeminiNonStreaming(res, body.messages, body.model, requestId);
+      }
+      return;
+    }
+
+    // --- Claude path (existing flow) ---
+    console.error(`[Route] → Claude (model: ${body.model})`);
 
     // Session persistence: look up or create a session for this conversation
     const conversationId = body.user || requestId;
@@ -314,6 +341,20 @@ async function handleStreamingResponse(
           isFirst = false;
         }
 
+        // Append model tag
+        const tagChunk = {
+          id: `chatcmpl-${requestId}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: lastModel,
+          choices: [{
+            index: 0,
+            delta: { content: "\n\n🟣 Claude" },
+            finish_reason: null,
+          }],
+        };
+        res.write(`data: ${JSON.stringify(tagChunk)}\n\n`);
+
         // Send final done chunk with finish_reason
         const doneChunk = createDoneChunk(requestId, lastModel);
         res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
@@ -400,7 +441,11 @@ async function handleNonStreamingResponse(
 
     subprocess.on("close", (code: number | null) => {
       if (finalResult) {
-        res.json(cliResultToOpenai(finalResult, requestId));
+        const response = cliResultToOpenai(finalResult, requestId);
+        if (response.choices[0]?.message?.content) {
+          response.choices[0].message.content += "\n\n🟣 Claude";
+        }
+        res.json(response);
       } else if (!res.headersSent) {
         res.status(500).json({
           error: {
@@ -454,6 +499,24 @@ export function handleModels(_req: Request, res: Response): void {
         id: "claude-haiku-4",
         object: "model",
         owned_by: "anthropic",
+        created: Math.floor(Date.now() / 1000),
+      },
+      {
+        id: "gemini-pro",
+        object: "model",
+        owned_by: "google",
+        created: Math.floor(Date.now() / 1000),
+      },
+      {
+        id: "gemini-flash",
+        object: "model",
+        owned_by: "google",
+        created: Math.floor(Date.now() / 1000),
+      },
+      {
+        id: "auto",
+        object: "model",
+        owned_by: "proxy",
         created: Math.floor(Date.now() / 1000),
       },
     ],
