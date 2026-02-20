@@ -56,7 +56,7 @@ export async function routeRequest(userMessage: string): Promise<RouteDecision> 
           { role: "system", content: ROUTER_SYSTEM_PROMPT },
           { role: "user", content: userMessage },
         ],
-        max_tokens: 10,
+        max_tokens: 256,
         temperature: 0,
         stream: false,
       }),

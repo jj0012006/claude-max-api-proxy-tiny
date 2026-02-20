@@ -21,7 +21,7 @@ export function loadConfig(): ProxyConfig {
     litellmBaseUrl: process.env.LITELLM_BASE_URL || "http://127.0.0.1:4000",
     routerModel: process.env.ROUTER_MODEL || "gemini-flash",
     routerEnabled: process.env.ROUTER_ENABLED !== "false",
-    geminiDefaultModel: process.env.GEMINI_DEFAULT_MODEL || "gemini-pro",
+    geminiDefaultModel: process.env.GEMINI_DEFAULT_MODEL || "gemini-flash",
     openclawBaseUrl: process.env.OPENCLAW_BASE_URL || "http://127.0.0.1:18789",
   };
 }

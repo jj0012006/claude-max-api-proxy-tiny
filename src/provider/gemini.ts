@@ -10,6 +10,22 @@ import { config } from "../config.js";
 import type { OpenAIChatMessage } from "../types/openai.js";
 
 /**
+ * Strip model tags (🟣 Claude, 🟢 Gemini) from message content
+ * to prevent models from copying these tags in their responses.
+ */
+function stripModelTags(messages: OpenAIChatMessage[]): OpenAIChatMessage[] {
+  return messages.map((msg) => {
+    if (msg.role === "assistant" && typeof msg.content === "string") {
+      return {
+        ...msg,
+        content: msg.content.replace(/\n*🟣\s*Claude\s*$/g, "").replace(/\n*🟢\s*Gemini\s*$/g, ""),
+      };
+    }
+    return msg;
+  });
+}
+
+/**
  * Map model names to LiteLLM model identifiers
  */
 function resolveGeminiModel(model: string): string {
@@ -46,7 +62,7 @@ export async function handleGeminiStreaming(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: geminiModel,
-        messages,
+        messages: stripModelTags(messages),
         stream: true,
       }),
     });
@@ -68,7 +84,7 @@ export async function handleGeminiStreaming(
       return;
     }
 
-    // Stream SSE from LiteLLM to client
+    // Stream SSE from LiteLLM to client, intercepting [DONE] to insert tag
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
 
@@ -78,24 +94,30 @@ export async function handleGeminiStreaming(
 
       const chunk = decoder.decode(value, { stream: true });
       if (!res.writableEnded) {
-        res.write(chunk);
+        // Intercept [DONE] — insert our tag before it
+        if (chunk.includes("data: [DONE]")) {
+          const before = chunk.replace(/data: \[DONE\]\n?\n?/g, "");
+          if (before.trim()) {
+            res.write(before);
+          }
+          // Insert Gemini tag
+          const tagChunk = {
+            id: `chatcmpl-${requestId}`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: geminiModel,
+            choices: [{
+              index: 0,
+              delta: { content: "\n\n🟢 Gemini" },
+              finish_reason: null,
+            }],
+          };
+          res.write(`data: ${JSON.stringify(tagChunk)}\n\n`);
+          res.write("data: [DONE]\n\n");
+        } else {
+          res.write(chunk);
+        }
       }
-    }
-
-    // Append Gemini model tag before closing stream
-    if (!res.writableEnded) {
-      const tagChunk = {
-        id: `chatcmpl-${requestId}`,
-        object: "chat.completion.chunk",
-        created: Math.floor(Date.now() / 1000),
-        model: geminiModel,
-        choices: [{
-          index: 0,
-          delta: { content: "\n\n🟢 Gemini" },
-          finish_reason: null,
-        }],
-      };
-      res.write(`data: ${JSON.stringify(tagChunk)}\n\n`);
     }
 
     // Ensure stream is properly closed
@@ -135,7 +157,7 @@ export async function handleGeminiNonStreaming(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: geminiModel,
-        messages,
+        messages: stripModelTags(messages),
         stream: false,
       }),
     });

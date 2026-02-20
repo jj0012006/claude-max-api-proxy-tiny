@@ -26,6 +26,18 @@ import { handleGeminiStreaming, handleGeminiNonStreaming } from "../provider/gem
 import { extractLatestUserMessage } from "../adapter/openai-to-cli.js";
 
 /**
+ * Strip OpenClaw metadata prefix from user messages.
+ *
+ * OpenClaw wraps user messages with "Conversation info (untrusted metadata):"
+ * followed by a ```json block. This confuses the router classifier.
+ * We extract only the actual user message for routing decisions.
+ */
+function stripOpenClawMetadata(text: string): string {
+  const match = text.match(/```json[\s\S]*?```\s*([\s\S]+)/);
+  return match ? match[1].trim() : text;
+}
+
+/**
  * Handle POST /v1/chat/completions
  *
  * Main endpoint for chat requests, supports both streaming and non-streaming
@@ -62,7 +74,7 @@ export async function handleChatCompletions(
     if (!provider) {
       // model is "auto" or unrecognized — use intelligent routing
       const latestMsg = extractLatestUserMessage(body.messages);
-      provider = await routeRequest(latestMsg);
+      provider = await routeRequest(stripOpenClawMetadata(latestMsg));
     }
 
     // --- Gemini path ---
