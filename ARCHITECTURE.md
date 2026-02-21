@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The proxy is a focused bridge between OpenAI-compatible API clients and Claude Code CLI. It translates API requests into CLI subprocess calls, buffers multi-turn tool execution output, and manages session persistence.
+A stateless bridge between OpenAI-compatible API clients and Claude Code CLI. Translates API requests into CLI subprocess calls and buffers multi-turn tool execution output.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -14,11 +14,9 @@ The proxy is a focused bridge between OpenAI-compatible API clients and Claude C
 ┌─────────────────────────────────────────────────────┐
 │              OpenClaw Gateway (:18789)               │
 │                                                     │
-│  ┌─────────────┐  ┌───────────┐  ┌──────────────┐  │
-│  │ Multi-Agent  │  │ Bindings  │  │  Platform    │  │
-│  │   Routing    │  │ channel→  │  │  Tools       │  │
-│  │             │  │  agent    │  │  (cron,etc)  │  │
-│  └─────────────┘  └───────────┘  └──────────────┘  │
+│  Multi-Agent Routing │ Bindings │ Platform Tools    │
+│  Session & Memory    │ channel→ │ (cron, browser)   │
+│  Management          │  agent   │                   │
 │                                                     │
 │  Tools (model-agnostic, available to ALL agents):   │
 │  Bash, Read, Write, Edit, Grep, Glob,              │
@@ -26,7 +24,7 @@ The proxy is a focused bridge between OpenAI-compatible API clients and Claude C
 └───────┬─────────────────────────────┬───────────────┘
         │                             │
         │ Claude agents               │ Gemini agents
-        │ POST /v1/chat/completions   │ (native, direct API)
+        │ POST /v1/chat/completions   │ (native, direct)
         ▼                             ▼
 ┌───────────────────────┐   ┌─────────────────────────┐
 │ Claude Max API Proxy  │   │    Google AI API         │
@@ -36,23 +34,19 @@ The proxy is a focused bridge between OpenAI-compatible API clients and Claude C
 │ │OAI→CLI │ │CLI→OAI ││   │  access (Bash, Web, etc)│
 │ │Adapter │ │Adapter ││   └─────────────────────────┘
 │ └───┬────┘ └───▲────┘│
-│     │          │      │
 │ ┌───▼──────────┴────┐ │
-│ │ Claude CLI        │ │
+│ │ Subprocess Mgr    │ │
 │ │ + Turn Buffering  │ │
+│ │ + Telegram Prog.  │ │
 │ └───┬───────────────┘ │
-│ ┌───▼────┐ ┌────────┐ │
-│ │Session │ │Persona │ │
-│ │Manager │ │Config  │ │
-│ └────────┘ └────────┘ │
-└───────┬───────────────┘
-        │ subprocess
-        ▼
+└─────┼─────────────────┘
+      │ subprocess
+      ▼
 ┌───────────────────────┐
 │   Claude Code CLI     │
 │   --print --stream    │
 │   --skip-permissions  │
-│   CWD: workspaces/    │
+│   --system-prompt     │
 └───────┬───────────────┘
         │ OAuth (Max)
         ▼
@@ -70,16 +64,13 @@ The proxy is a focused bridge between OpenAI-compatible API clients and Claude C
 Entry point for all API requests. Handles:
 
 1. **Request validation** — Ensures messages array is present and non-empty
-2. **Session lookup** — Checks for existing conversation session to resume
-3. **CLI conversion** — Converts OpenAI format to CLI input via adapter
-4. **Subprocess dispatch** — Starts Claude CLI subprocess with appropriate flags
-5. **Response formatting** — Streaming (SSE) or non-streaming (JSON)
+2. **CLI conversion** — Converts OpenAI format to CLI input via adapter
+3. **Subprocess dispatch** — Starts Claude CLI subprocess
+4. **Response formatting** — Streaming (SSE) or non-streaming (JSON)
 
 ### Smart Turn Buffering (`src/server/routes.ts`)
 
-Claude CLI executes multiple "turns" when using tools. Each turn is marked by a `message_start` event and produces content deltas. Without buffering, intermediate tool output would leak to the client.
-
-The proxy buffers all content deltas per turn and only flushes the **last turn's** content when the `result` event arrives. This ensures the client only sees the final answer.
+Claude CLI executes multiple "turns" when using tools. Each turn is marked by a `message_start` event. The proxy buffers all content deltas per turn and only flushes the **last turn's** content when the `result` event arrives.
 
 ```
 Turn 1: [Read file] → content: "Let me check..."     ← discarded
@@ -87,16 +78,18 @@ Turn 2: [Bash cmd]  → content: "Running..."           ← discarded
 Turn 3: [no tools]  → content: "Here's the answer..." ← sent to client
 ```
 
+### Telegram Progress Reporter (`src/server/routes.ts`)
+
+Sends tool execution progress updates via Telegram Bot API during long-running requests. Reads bot token from `~/.openclaw/openclaw.json` (cached). Throttled to 1 update per 3 seconds.
+
 ### OpenAI → CLI Adapter (`src/adapter/openai-to-cli.ts`)
 
 Converts OpenAI chat completion requests to Claude CLI input:
 
-- **System messages** → `--system-prompt` flag
+- **System messages** → `--system-prompt` flag (passthrough, no injection)
 - **User messages** → CLI prompt text
 - **Assistant messages** → Wrapped in `<previous_response>` tags (with XML tool patterns cleaned)
 - **Model mapping** → `claude-opus-4` → `opus`, `claude-sonnet-4` → `sonnet`, etc.
-- **Session handling** → Existing session: only send latest user message; new session: send full context
-- **CLI tool instructions** → Injected into system prompt (Bash, file ops, voice transcription, YouTube analysis)
 
 ### CLI → OpenAI Adapter (`src/adapter/cli-to-openai.ts`)
 
@@ -111,76 +104,19 @@ Converts Claude CLI JSON stream output to OpenAI API format:
 Manages Claude CLI subprocess lifecycle:
 
 - **Spawn**: `claude --print --output-format stream-json --verbose --dangerously-skip-permissions`
-- **Flags**: `--model`, `--session-id`, `--resume`, `--system-prompt`
+- **Flags**: `--model`, `--system-prompt`
 - **Activity timeout**: 10 minutes of no stdout output → SIGTERM
-- **Resume failure detection**: Scans stderr for "Could not find session" → emits `resume_failed` event
 - **Event emission**: Parses JSON lines from stdout → typed events (message, content_delta, assistant, result)
-
-### Session Manager (`src/session/manager.ts`)
-
-Maps conversation IDs to Claude CLI session UUIDs:
-
-- **`get(conversationId)`** — Look up existing session
-- **`getOrCreate(conversationId, model)`** — Get or create session UUID
-- **`invalidate(conversationId)`** — Remove session on resume failure
-- **TTL**: 24 hours with periodic cleanup
 
 ### Monitoring Dashboard (`src/server/dashboard.ts`)
 
 - **`GET /dashboard`** — Auto-refreshing HTML dashboard (5s interval)
-- **`GET /api/status`** — JSON status API with component health, request counts, session details
+- **`GET /api/status`** — JSON status API with component health and request counts
 - **Components monitored**: Proxy, OpenClaw Gateway, Claude CLI
 
 ### Statistics (`src/server/stats.ts`)
 
 In-memory request counter. Tracks total requests and uptime. Reset on process restart.
-
-## v1 → v2 Migration
-
-### Removed Components
-
-| v1 Component | v2 Replacement |
-|---|---|
-| `src/router/index.ts` (Gemini Flash classifier) | OpenClaw agent bindings (per-channel routing) |
-| `src/provider/gemini.ts` (LiteLLM proxy) | OpenClaw native Gemini provider (with full tool access) |
-| LiteLLM sidecar process | Not needed — Gemini runs natively in OpenClaw |
-| Message-level intelligent routing | Agent-level channel routing |
-| Gemini without tools (v1: text-only via LiteLLM) | Gemini with all OpenClaw tools (v2: Bash, WebSearch, Read, etc.) |
-| `LITELLM_BASE_URL` env var | Removed |
-| `ROUTER_MODEL` / `ROUTER_ENABLED` env vars | Removed |
-| `GEMINI_DEFAULT_MODEL` env var | Removed |
-
-### Retained Components
-
-| Component | Role |
-|---|---|
-| OpenAI → CLI Adapter | Core: format conversion |
-| CLI → OpenAI Adapter | Core: format conversion |
-| Smart Turn Buffering | Core: tool output filtering |
-| Session Manager | Persistence: `--resume` support |
-| Subprocess Manager | Core: CLI lifecycle |
-| Telegram Progress | UX: tool execution updates |
-
-### Routing Architecture Change
-
-**v1**: Proxy decides per-message which provider to use (Claude vs Gemini)
-```
-Request → model check → explicit provider?
-  yes → route directly
-  no  → Gemini Flash classifier → Claude or Gemini
-```
-
-**v2**: OpenClaw decides per-channel which agent (and model) to use
-```
-Discord channel → OpenClaw binding → agent → model → provider
-  ├── #kol-scout    → kol-scout agent → claude-opus-4    → Proxy → CLI → Anthropic
-  ├── #ai-news      → ai-news agent   → claude-sonnet-4  → Proxy → CLI → Anthropic
-  ├── #general      → general agent   → claude-sonnet-4  → Proxy → CLI → Anthropic
-  ├── #quick-qa     → gemini-qa agent → gemini-2.5-flash → Google AI API (native)
-  └── Telegram      → general agent   → claude-sonnet-4  → Proxy → CLI → Anthropic
-```
-
-Gemini agents bypass the proxy entirely — OpenClaw calls the Google AI API directly and provides its full tool suite (Bash, WebSearch, Read, Write, etc.) to Gemini via its model-agnostic tool system.
 
 ## Data Flow
 
@@ -189,25 +125,133 @@ Gemini agents bypass the proxy entirely — OpenClaw calls the Google AI API dir
 ```
 1. Client → POST /v1/chat/completions (stream: true)
 2. Proxy: Set SSE headers, flush, write ":ok\n\n"
-3. Proxy: Look up / create session
-4. Proxy: Convert OpenAI messages → CLI prompt + system prompt
-5. Proxy: Spawn claude subprocess with flags
-7. CLI → stdout JSON lines:
+3. Proxy: Convert OpenAI messages → CLI prompt + system prompt
+4. Proxy: Spawn claude subprocess with flags
+5. CLI → stdout JSON lines:
    a. system/init → ignored
    b. message_start (turn N) → reset buffer
    c. content_block_delta → buffer text
    d. message_start (turn N+1) → reset buffer (discard turn N)
    e. content_block_delta → buffer text
-   f. result → flush buffer as SSE chunks, append model tag, send [DONE]
-8. Proxy → Client: SSE stream of chat.completion.chunk events
+   f. result → flush buffer as SSE chunks, append 🟣 model tag, send [DONE]
+6. Proxy → Client: SSE stream of chat.completion.chunk events
 ```
 
 ### Non-Streaming Request
 
 ```
 1. Client → POST /v1/chat/completions (stream: false)
-2. Proxy: Same steps 3-6 as above
+2. Proxy: Same steps 3-4 as above
 3. CLI → stdout JSON lines → wait for result event
-4. Proxy: Convert result → OpenAI ChatCompletion JSON
+4. Proxy: Convert result → OpenAI ChatCompletion JSON, append 🟣 model tag
 5. Proxy → Client: Single JSON response
 ```
+
+## Session & Memory Management
+
+**The proxy is completely stateless.** All session, memory, and agent identity management is handled by OpenClaw.
+
+| Responsibility | Owner | How |
+|---|---|---|
+| Conversation history | OpenClaw | Sends full `messages` array each request |
+| Agent persona | OpenClaw | Injects via system message / workspace CLAUDE.md |
+| Persistent memory | OpenClaw | `memory/` files injected into system message |
+| Model routing | OpenClaw | Per-channel agent bindings |
+| Proxy state | None | Zero state between requests |
+
+### Context Flow
+
+```
+OpenClaw constructs:
+  messages: [
+    { system: "<agent identity> + <memory context>" },
+    { user: "message 1" },
+    { assistant: "response 1" },
+    { user: "current message" }
+  ]
+       ↓
+Proxy splits:
+  --system-prompt = system messages joined
+  prompt = user/assistant messages concatenated
+       ↓
+Claude CLI: fresh process, no --session-id or --resume
+       ↓
+Response → OpenClaw stores in history → next request includes it
+```
+
+## v1 → v2 Changes
+
+### Removed Components
+
+| v1 Component | v2 Replacement |
+|---|---|
+| `src/router/index.ts` (Gemini Flash classifier) | OpenClaw agent bindings (per-channel routing) |
+| `src/provider/gemini.ts` (LiteLLM proxy) | OpenClaw native Gemini provider (direct API) |
+| `src/session/manager.ts` | Removed — OpenClaw sends full history |
+| `bots.json` / `src/bot/config.ts` | OpenClaw agent workspaces + CLAUDE.md |
+| `CLI_TOOL_INSTRUCTION` (~65 lines) | Agent CLAUDE.md (per-agent instructions) |
+| LiteLLM sidecar process (:4000) | Not needed — Gemini runs natively in OpenClaw |
+| `--session-id` / `--resume` CLI flags | Not needed — full context each request |
+| `migrate-claude-md.sh` | Not needed — OpenClaw manages workspaces |
+
+### Retained Components
+
+| Component | Role |
+|---|---|
+| OpenAI → CLI Adapter | Core: format conversion |
+| CLI → OpenAI Adapter | Core: format conversion |
+| Smart Turn Buffering | Core: tool output filtering |
+| Subprocess Manager | Core: CLI lifecycle + activity timeout |
+| Telegram Progress Reporter | UX: tool execution updates |
+| Model Tag (🟣) | UX: identify response source |
+
+## v1 vs v2 Architecture Comparison
+
+### v1: Proxy as Smart Hub
+
+```
+Clients → OpenClaw → Proxy (:3456) ─┬─ Router (Gemini Flash classifier)
+                                     ├─ Claude Path: Session Mgr → CLI --resume
+                                     ├─ Gemini Path: → LiteLLM (:4000) → Google API
+                                     └─ Bot Config + CLI_TOOL_INSTRUCTION injection
+```
+
+### v2: Proxy as Stateless Translator
+
+```
+Clients → OpenClaw (:18789) ─┬─ Claude agents → Proxy (:3456) → CLI → Anthropic
+          (routing/session/  └─ Gemini agents → Google AI API (direct)
+           memory all here)
+```
+
+### Side-by-Side
+
+| Dimension | v1 | v2 |
+|---|---|---|
+| **Proxy role** | Smart hub: routing + session + memory | Stateless translator: format conversion only |
+| **Codebase** | ~2500 lines (16 source files) | ~950 lines (-60%) |
+| **Processes** | 3 (Proxy + LiteLLM + OpenClaw) | 2 (Proxy + OpenClaw) |
+| **Routing** | Per-message (Gemini Flash classifier, +1-2s) | Per-channel (OpenClaw agent binding) |
+| **Session** | SessionManager + --resume (was dead code) | None (full history each request) |
+| **Memory** | Proxy injects CLI_TOOL_INSTRUCTION + bootstraps memory/ | OpenClaw injects via system message |
+| **Personas** | bots.json + proxy system prompt injection | OpenClaw agent workspace CLAUDE.md |
+| **Gemini** | Proxy → LiteLLM → Google API (text-only) | OpenClaw → Google API (with full tools) |
+
+### What v1 Had (Theoretically)
+
+1. **CLI Session Resume** — `--resume` could save tokens by only sending new messages. But `body.user` was always undefined, so sessions never actually resumed.
+2. **Per-message routing** — Auto-select best model per message. But added 1-2s latency and classification was unreliable.
+3. **Centralized tool instructions** — One place to update voice/YouTube/media handling. But these belong in agent config, not proxy.
+
+### What v2 Gained
+
+1. **Maintainability** — 60% less code, single responsibility, zero state bugs
+2. **Stability** — No LiteLLM process to crash/OOM
+3. **Agent isolation** — Each agent has independent workspace, CLAUDE.md, memory
+4. **No dead code** — Every code path actually executes
+5. **Simpler debugging** — Problems only in message conversion or CLI subprocess
+6. **Flexible ops** — Change agent config without restarting proxy
+
+### Long-term Consideration
+
+Full history injection causes linear context growth. Mitigation should happen at the OpenClaw layer (conversation windowing, history summarization), not by reintroducing session management in the proxy.

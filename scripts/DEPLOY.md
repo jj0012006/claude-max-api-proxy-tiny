@@ -18,7 +18,7 @@ OpenClaw (:18789)  →  Claude Proxy (:3456)  →  Claude CLI  →  Anthropic AP
 
 ```bash
 export OPENCLAW_BASE_URL=http://127.0.0.1:18789  # OpenClaw 地址（默认值）
-export PROXY_CWD=/path/to/workspace               # Claude CLI 工作目录
+export PROXY_CWD=~/.openclaw/workspaces/default/    # Claude CLI 工作目录（agent workspace）
 ```
 
 ## 一键重启

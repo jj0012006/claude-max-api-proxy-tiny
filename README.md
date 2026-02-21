@@ -47,7 +47,6 @@ Telegram / Slack / Discord / Any Client
   Claude Code CLI (subprocess)
     - --print --output-format stream-json
     - --dangerously-skip-permissions
-    - --session-id / --resume
     |
     v
   Anthropic API (via Max subscription)
@@ -58,10 +57,7 @@ Telegram / Slack / Discord / Any Client
 
 - **OpenAI-compatible API** — Works with any client that supports OpenAI's API format
 - **Streaming support** — Real-time SSE streaming with Smart Turn Buffering
-- **Session persistence** — Multi-turn conversations via `--resume` / `--session-id`
 - **Tool execution** — Full CLI tool access (Bash, Read, Write, WebFetch, WebSearch, etc.)
-- **Voice support** — Audio transcription via Groq Whisper
-- **YouTube analysis** — Video content analysis via yt-dlp
 - **Telegram progress** — Live tool execution updates in Telegram chats
 - **Activity timeout** — Auto-kill after 10 minutes of inactivity
 - **Gemini native tools** — Gemini agents run natively in OpenClaw with full tool access (Bash, WebSearch, etc.)
@@ -153,14 +149,12 @@ To customize an agent's behavior, edit its CLAUDE.md directly:
 vim ~/.openclaw/workspaces/kol-scout/CLAUDE.md
 ```
 
-A migration script (`migrate-claude-md.sh`) is provided to bootstrap CLAUDE.md files for each agent workspace.
-
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3456` | Proxy server port |
-| `PROXY_CWD` | Current directory | Default working directory for CLI subprocesses |
+| `PROXY_CWD` | `~/.openclaw/workspaces/default/` | Working directory for CLI subprocesses (agent workspace path) |
 
 ## Architecture
 
@@ -176,8 +170,6 @@ src/
 │   └── cli-to-openai.ts     # CLI → OpenAI format (result, streaming chunks)
 ├── subprocess/
 │   └── manager.ts           # Claude CLI subprocess lifecycle
-├── session/
-│   └── manager.ts           # Session ID mapping, persistence, resume
 └── server/
     ├── index.ts             # Express server setup
     ├── routes.ts            # Route handlers + Smart Turn Buffering + Telegram progress
