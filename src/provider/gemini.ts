@@ -18,11 +18,27 @@ function stripModelTags(messages: OpenAIChatMessage[]): OpenAIChatMessage[] {
     if (msg.role === "assistant" && typeof msg.content === "string") {
       return {
         ...msg,
-        content: msg.content.replace(/\n*🟣\s*Claude\s*$/g, "").replace(/\n*🟢\s*Gemini\s*$/g, ""),
+        content: msg.content.replace(/\n*🟣\s*\S.*$/g, "").replace(/\n*🟢\s*\S.*$/g, ""),
       };
     }
     return msg;
   });
+}
+
+/**
+ * Prepare messages for Gemini: strip model tags and inject system message
+ * to prevent the model from generating its own tags.
+ */
+function prepareGeminiMessages(messages: OpenAIChatMessage[]): OpenAIChatMessage[] {
+  const cleaned = stripModelTags(messages);
+  // Inject system message to prevent Gemini from copying model tag patterns
+  return [
+    {
+      role: "system",
+      content: "Never append emoji model tags (like 🟣 or 🟢 followed by a model name) at the end of your responses.",
+    },
+    ...cleaned,
+  ];
 }
 
 /**
@@ -62,8 +78,9 @@ export async function handleGeminiStreaming(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: geminiModel,
-        messages: stripModelTags(messages),
+        messages: prepareGeminiMessages(messages),
         stream: true,
+        tools: [{ googleSearch: {} }],
       }),
     });
 
@@ -87,6 +104,7 @@ export async function handleGeminiStreaming(
     // Stream SSE from LiteLLM to client, intercepting [DONE] to insert tag
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
+    let actualModel = geminiModel;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -94,21 +112,27 @@ export async function handleGeminiStreaming(
 
       const chunk = decoder.decode(value, { stream: true });
       if (!res.writableEnded) {
+        // Try to extract actual model name from the first chunk
+        if (actualModel === geminiModel) {
+          const modelMatch = chunk.match(/"model"\s*:\s*"([^"]+)"/);
+          if (modelMatch) actualModel = modelMatch[1];
+        }
+
         // Intercept [DONE] — insert our tag before it
         if (chunk.includes("data: [DONE]")) {
           const before = chunk.replace(/data: \[DONE\]\n?\n?/g, "");
           if (before.trim()) {
             res.write(before);
           }
-          // Insert Gemini tag
+          // Insert Gemini tag with actual model name
           const tagChunk = {
             id: `chatcmpl-${requestId}`,
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
-            model: geminiModel,
+            model: actualModel,
             choices: [{
               index: 0,
-              delta: { content: "\n\n🟢 Gemini" },
+              delta: { content: `\n\n🟢 ${actualModel}` },
               finish_reason: null,
             }],
           };
@@ -157,8 +181,9 @@ export async function handleGeminiNonStreaming(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: geminiModel,
-        messages: stripModelTags(messages),
+        messages: prepareGeminiMessages(messages),
         stream: false,
+        tools: [{ googleSearch: {} }],
       }),
     });
 
@@ -182,9 +207,14 @@ export async function handleGeminiNonStreaming(
     result.id = `chatcmpl-${requestId}`;
 
     // Append Gemini model tag to response content
+    const actualModel = (result.model as string) || geminiModel;
     const choices = (result.choices as Array<{ message?: { content?: string } }>) || [];
     if (choices[0]?.message?.content) {
-      choices[0].message.content += "\n\n🟢 Gemini";
+      // Strip any model-generated tags before appending our own
+      choices[0].message.content = choices[0].message.content
+        .replace(/\n*🟣\s*\S.*$/g, "")
+        .replace(/\n*🟢\s*\S.*$/g, "");
+      choices[0].message.content += `\n\n🟢 ${actualModel}`;
     }
 
     res.setHeader("X-Provider", "gemini");

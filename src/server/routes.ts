@@ -24,17 +24,39 @@ import { routeRequest, getExplicitProvider } from "../router/index.js";
 import { statsCollector } from "./stats.js";
 import { handleGeminiStreaming, handleGeminiNonStreaming } from "../provider/gemini.js";
 import { extractLatestUserMessage } from "../adapter/openai-to-cli.js";
+import { resolvePersona } from "../bot/config.js";
 
 /**
  * Strip OpenClaw metadata prefix from user messages.
  *
- * OpenClaw wraps user messages with "Conversation info (untrusted metadata):"
- * followed by a ```json block. This confuses the router classifier.
- * We extract only the actual user message for routing decisions.
+ * OpenClaw wraps user messages with metadata blocks (Conversation info, Sender info)
+ * as ```json fenced code blocks. Discord messages may have multiple blocks.
+ * We strip ALL metadata blocks and extract only the actual user message.
  */
 function stripOpenClawMetadata(text: string): string {
-  const match = text.match(/```json[\s\S]*?```\s*([\s\S]+)/);
-  return match ? match[1].trim() : text;
+  // Remove all ```json...``` blocks and their preceding labels
+  const stripped = text.replace(/[^\n]*\(untrusted metadata\):\s*```json[\s\S]*?```\s*/g, "");
+  return stripped.trim() || text;
+}
+
+/**
+ * Extract channel/conversation identifier from OpenClaw metadata.
+ * Looks for "channel id:XXXXX" in Conversation info metadata.
+ * Falls back to body.user if no metadata match.
+ */
+function extractChannelId(messages: OpenAIChatRequest["messages"], fallback: string): string {
+  // Search ALL user messages for channel ID in metadata (may be in first message, not last)
+  for (const msg of messages) {
+    if (msg.role !== "user") continue;
+    const content = typeof msg.content === "string"
+      ? msg.content
+      : Array.isArray(msg.content)
+        ? msg.content.map(p => (p as { text?: string }).text || "").join("")
+        : "";
+    const channelMatch = content.match(/channel id:(\d+)/);
+    if (channelMatch) return channelMatch[1];
+  }
+  return fallback;
 }
 
 /**
@@ -66,15 +88,34 @@ export async function handleChatCompletions(
     const { messages, tools, ...topFields } = body as unknown as Record<string, unknown>;
     console.error(`[Request] Top fields: ${JSON.stringify(topFields)}`);
     console.error(`[Request] messages count: ${Array.isArray(messages) ? (messages as unknown[]).length : 0}, tools count: ${Array.isArray(tools) ? (tools as unknown[]).length : 0}`);
+    // DEBUG: log first user message to see full metadata format
+    const firstUserMsg = body.messages.find(m => m.role === "user");
+    if (firstUserMsg) {
+      const content = typeof firstUserMsg.content === "string" ? firstUserMsg.content : JSON.stringify(firstUserMsg.content);
+      console.error(`[Debug] First user message (500 chars): ${content.slice(0, 500)}`);
+    }
+
+    // --- Resolve persona BEFORE routing ---
+    const channelId = extractChannelId(body.messages, body.user || "");
+    const persona = resolvePersona(channelId);
+    if (persona.id !== "default") {
+      console.error(`[Route] Persona: ${persona.id} (${persona.name}), channel: ${channelId}`);
+    }
 
     // --- Routing: decide which provider handles this request ---
     const explicitProvider = getExplicitProvider(body.model);
     let provider = explicitProvider;
 
     if (!provider) {
-      // model is "auto" or unrecognized — use intelligent routing
-      const latestMsg = extractLatestUserMessage(body.messages);
-      provider = await routeRequest(stripOpenClawMetadata(latestMsg));
+      // Persona bots always use Claude (they need tools and custom system prompts)
+      if (persona.id !== "default") {
+        provider = "claude";
+        console.error(`[Router] Forced claude for persona: ${persona.id}`);
+      } else {
+        // model is "auto" or unrecognized — use intelligent routing
+        const latestMsg = extractLatestUserMessage(body.messages);
+        provider = await routeRequest(stripOpenClawMetadata(latestMsg));
+      }
     }
 
     // --- Gemini path ---
@@ -93,25 +134,32 @@ export async function handleChatCompletions(
     statsCollector.recordRequest("claude");
     console.error(`[Route] → Claude (model: ${body.model})`);
 
-    // Session persistence: look up or create a session for this conversation
-    const conversationId = body.user || requestId;
+    // Session persistence: namespace conversationId by persona
+    const rawConversationId = body.user || channelId || requestId;
+    const conversationId = persona.id !== "default"
+      ? `${persona.id}:${rawConversationId}`
+      : rawConversationId;
     const existingSession = sessionManager.get(conversationId);
     const hasExistingSession = !!existingSession;
     const resumeSessionId = existingSession?.claudeSessionId;
 
     // Convert to CLI input format (uses hasExistingSession to decide prompt strategy)
-    const cliInput = openaiToCli(body, hasExistingSession);
+    const cliInput = openaiToCli(body, hasExistingSession, persona);
     const subprocess = new ClaudeSubprocess();
 
     const claudeSessionId = sessionManager.getOrCreate(conversationId, cliInput.model);
     sessionManager.incrementMessageCount(conversationId);
 
-    // Build subprocess options with session and system prompt
+    // Build subprocess options with session, system prompt, and persona workspace
+    const personaCwd = ClaudeSubprocess.getStableCwd(persona.id);
+    await ClaudeSubprocess.ensureCwd(personaCwd, persona.claudeMd);
+
     const subprocessOpts: SubprocessOptions = {
       model: cliInput.model,
       sessionId: claudeSessionId,
       resumeSessionId,
       systemPrompt: cliInput.systemPrompt,
+      cwd: personaCwd,
     };
 
     if (stream) {
@@ -368,7 +416,7 @@ async function handleStreamingResponse(
           model: lastModel,
           choices: [{
             index: 0,
-            delta: { content: "\n\n🟣 Claude" },
+            delta: { content: `\n\n🟣 ${lastModel}` },
             finish_reason: null,
           }],
         };
@@ -462,7 +510,8 @@ async function handleNonStreamingResponse(
       if (finalResult) {
         const response = cliResultToOpenai(finalResult, requestId);
         if (response.choices[0]?.message?.content) {
-          response.choices[0].message.content += "\n\n🟣 Claude";
+          const claudeModel = response.model || "claude";
+          response.choices[0].message.content += `\n\n🟣 ${claudeModel}`;
         }
         res.json(response);
       } else if (!res.headersSent) {

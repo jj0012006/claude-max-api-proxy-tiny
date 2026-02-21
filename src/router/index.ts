@@ -13,20 +13,26 @@ export type RouteDecision = "claude" | "gemini";
 const ROUTER_SYSTEM_PROMPT = `You are a task router. Classify the user's request and respond with ONLY one word: "claude" or "gemini".
 
 Route to "gemini" when the task is:
+- Translation between languages
+- General knowledge Q&A (weather, trivia, definitions, daily life questions)
 - Mathematical proofs or scientific computation
 - Processing very large documents (summarization of long texts)
-- Translation between languages
-- General knowledge Q&A that doesn't need tool execution
 - Data analysis or statistical reasoning
+- Creative writing (stories, poems, essays)
+- Explanation or tutoring on concepts
+- Casual conversation, greetings, chitchat
+- Factual lookups (dates, places, people, events)
+- Simple information retrieval or recommendations
 
 Route to "claude" when the task is:
 - Programming, coding, code review, debugging
-- Tasks requiring tool execution (running commands, reading/writing files, web search)
-- Complex multi-step analysis or research
+- Tasks that explicitly require running commands, reading/writing files on disk
+- Complex multi-step analysis or research that needs tool execution
 - Technical writing or documentation
 - System administration or DevOps tasks
 - Tasks that reference previous conversation context or memory
-- Anything unclear or ambiguous (claude is the safe default)
+
+Default to "gemini" unless the task clearly requires coding or tool execution.
 
 Respond with ONLY "claude" or "gemini". Nothing else.`;
 

@@ -6,6 +6,7 @@ import type {
   OpenAIChatRequest,
   OpenAIContentPart,
 } from "../types/openai.js";
+import type { BotPersona } from "../bot/config.js";
 
 export type ClaudeModel = "opus" | "sonnet" | "haiku";
 
@@ -289,7 +290,8 @@ export interface ConvertedMessages {
  * All other messages are formatted into the prompt text.
  */
 export function messagesToPrompt(
-  messages: OpenAIChatRequest["messages"]
+  messages: OpenAIChatRequest["messages"],
+  personaPrompt?: string | null
 ): ConvertedMessages {
   const systemParts: string[] = [];
   const promptParts: string[] = [];
@@ -325,13 +327,16 @@ export function messagesToPrompt(
     }
   }
 
-  // Build system prompt: combine system messages + CLI instructions
-  let systemPrompt: string | undefined;
-  if (systemParts.length > 0) {
-    systemPrompt = systemParts.join("\n\n") + "\n\n" + CLI_TOOL_INSTRUCTION;
-  } else {
-    systemPrompt = CLI_TOOL_INSTRUCTION;
+  // Build system prompt: persona prompt + system messages + CLI instructions
+  const parts: string[] = [];
+  if (personaPrompt) {
+    parts.push(`## Bot Persona\n\n${personaPrompt}`);
   }
+  if (systemParts.length > 0) {
+    parts.push(systemParts.join("\n\n"));
+  }
+  parts.push(CLI_TOOL_INSTRUCTION);
+  const systemPrompt = parts.join("\n\n");
 
   return {
     prompt: promptParts.join("\n").trim(),
@@ -348,8 +353,11 @@ export function messagesToPrompt(
  */
 export function openaiToCli(
   request: OpenAIChatRequest,
-  hasExistingSession: boolean = false
+  hasExistingSession: boolean = false,
+  persona?: BotPersona
 ): CliInput {
+  const personaPrompt = persona?.systemPrompt || null;
+
   if (hasExistingSession) {
     // Resuming an existing session: only send the latest user message
     const latestMessage = extractLatestUserMessage(request.messages);
@@ -362,8 +370,8 @@ export function openaiToCli(
     };
   }
 
-  // New session: send full conversation context
-  const converted = messagesToPrompt(request.messages);
+  // New session: send full conversation context with persona prompt
+  const converted = messagesToPrompt(request.messages, personaPrompt);
   return {
     prompt: converted.prompt,
     systemPrompt: converted.systemPrompt,

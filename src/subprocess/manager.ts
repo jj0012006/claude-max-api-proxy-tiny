@@ -95,17 +95,21 @@ export class ClaudeSubprocess extends EventEmitter {
   }
 
   /**
-   * Get the stable working directory for subprocess execution
+   * Get the stable working directory for subprocess execution.
+   * If personaId is provided, returns a per-persona workspace.
    */
-  private static getStableCwd(): string {
-    const cwd = process.env.PROXY_CWD || path.join(os.homedir(), ".openclaw", "workspace");
-    return cwd;
+  static getStableCwd(personaId?: string): string {
+    if (personaId && personaId !== "default") {
+      return path.join(os.homedir(), ".openclaw", "workspaces", personaId);
+    }
+    return process.env.PROXY_CWD || path.join(os.homedir(), ".openclaw", "workspace");
   }
 
   /**
-   * Ensure the working directory exists with memory infrastructure
+   * Ensure the working directory exists with memory infrastructure.
+   * Uses customClaudeMd for persona-specific CLAUDE.md seeding.
    */
-  private static async ensureCwd(cwd: string): Promise<void> {
+  static async ensureCwd(cwd: string, customClaudeMd?: string | null): Promise<void> {
     try {
       await fs.mkdir(cwd, { recursive: true });
 
@@ -118,8 +122,9 @@ export class ClaudeSubprocess extends EventEmitter {
       try {
         await fs.access(claudeMdPath);
       } catch {
-        await fs.writeFile(claudeMdPath, SEED_CLAUDE_MD);
-        console.error("[Subprocess] Created seed CLAUDE.md");
+        const content = customClaudeMd || SEED_CLAUDE_MD;
+        await fs.writeFile(claudeMdPath, content);
+        console.error(`[Subprocess] Created seed CLAUDE.md in ${cwd}`);
       }
 
       // Seed empty memory files if they don't exist
