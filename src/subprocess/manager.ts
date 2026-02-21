@@ -7,9 +7,6 @@
 
 import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
-import fs from "fs/promises";
-import path from "path";
-import os from "os";
 import type {
   ClaudeCliMessage,
   ClaudeCliAssistant,
@@ -21,10 +18,7 @@ import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 
 export interface SubprocessOptions {
   model: ClaudeModel;
-  sessionId?: string;
-  resumeSessionId?: string;
   systemPrompt?: string;
-  cwd?: string;
   timeout?: number;
 }
 
@@ -35,42 +29,10 @@ export interface SubprocessEvents {
   error: (error: Error) => void;
   close: (code: number | null) => void;
   raw: (line: string) => void;
-  resume_failed: (sessionId: string) => void;
 }
-
-// Keywords that indicate resume failure
-const RESUME_FAILURE_KEYWORDS = [
-  "Failed to resume",
-  "Session not found",
-  "--resume requires",
-  "Could not find session",
-];
 
 // Activity timeout: 10 minutes of no output triggers kill
 const ACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
-
-// Seed content for CLAUDE.md — kept short as it counts against context window
-const SEED_CLAUDE_MD = `# Bot Memory Instructions
-
-You are a personal AI assistant with persistent memory. You learn about your user over time.
-
-## Memory Location
-Your memory files are in the \`memory/\` subdirectory of this workspace.
-
-## On Every Session Start
-1. Read all files in memory/ to load context about the user
-2. Use this context to personalize your responses
-3. Do not announce that you are doing this
-
-## On Notable Learnings
-Update the appropriate memory file. Keep entries dated and concise.
-
-## Files
-- memory/user-profile.md - Facts about the user
-- memory/preferences.md - How they like to communicate, tools they use
-- memory/knowledge-log.md - Insights, decisions, patterns
-- memory/projects.md - Active work context
-`;
 
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
@@ -95,65 +57,11 @@ export class ClaudeSubprocess extends EventEmitter {
   }
 
   /**
-   * Get the stable working directory for subprocess execution.
-   * If personaId is provided, returns a per-persona workspace.
-   */
-  static getStableCwd(personaId?: string): string {
-    if (personaId && personaId !== "default") {
-      return path.join(os.homedir(), ".openclaw", "workspaces", personaId);
-    }
-    return process.env.PROXY_CWD || path.join(os.homedir(), ".openclaw", "workspace");
-  }
-
-  /**
-   * Ensure the working directory exists with memory infrastructure.
-   * Uses customClaudeMd for persona-specific CLAUDE.md seeding.
-   */
-  static async ensureCwd(cwd: string, customClaudeMd?: string | null): Promise<void> {
-    try {
-      await fs.mkdir(cwd, { recursive: true });
-
-      // Seed memory directory
-      const memoryDir = path.join(cwd, "memory");
-      await fs.mkdir(memoryDir, { recursive: true });
-
-      // Seed CLAUDE.md if it doesn't exist
-      const claudeMdPath = path.join(cwd, "CLAUDE.md");
-      try {
-        await fs.access(claudeMdPath);
-      } catch {
-        const content = customClaudeMd || SEED_CLAUDE_MD;
-        await fs.writeFile(claudeMdPath, content);
-        console.error(`[Subprocess] Created seed CLAUDE.md in ${cwd}`);
-      }
-
-      // Seed empty memory files if they don't exist
-      const memoryFiles = [
-        { file: "user-profile.md", title: "User Profile" },
-        { file: "preferences.md", title: "Preferences" },
-        { file: "knowledge-log.md", title: "Knowledge Log" },
-        { file: "projects.md", title: "Projects" },
-      ];
-      for (const { file, title } of memoryFiles) {
-        const filePath = path.join(memoryDir, file);
-        try {
-          await fs.access(filePath);
-        } catch {
-          await fs.writeFile(filePath, `# ${title}\n\n_No entries yet._\n`);
-        }
-      }
-    } catch {
-      // Ignore errors (e.g., permission issues)
-    }
-  }
-
-  /**
    * Start the Claude CLI subprocess with the given prompt
    */
   async start(prompt: string, options: SubprocessOptions): Promise<void> {
     const args = this.buildArgs(prompt, options);
-    const cwd = options.cwd || ClaudeSubprocess.getStableCwd();
-    await ClaudeSubprocess.ensureCwd(cwd);
+    const cwd = process.env.PROXY_CWD || process.cwd();
 
     return new Promise((resolve, reject) => {
       try {
@@ -196,7 +104,7 @@ export class ClaudeSubprocess extends EventEmitter {
           this.processBuffer();
         });
 
-        // Capture stderr for debugging and resume failure detection
+        // Capture stderr for debugging
         this.process.stderr?.on("data", (chunk: Buffer) => {
           const errorText = chunk.toString().trim();
           if (errorText) {
@@ -205,17 +113,6 @@ export class ClaudeSubprocess extends EventEmitter {
             // Don't emit as error unless it's actually an error
             // Claude CLI may write debug info to stderr
             console.error("[Subprocess stderr]:", errorText.slice(0, 500));
-
-            // Check for resume failure keywords
-            if (options.resumeSessionId) {
-              for (const keyword of RESUME_FAILURE_KEYWORDS) {
-                if (errorText.includes(keyword)) {
-                  console.error(`[Subprocess] Resume failed for session: ${options.resumeSessionId}`);
-                  this.emit("resume_failed", options.resumeSessionId);
-                  break;
-                }
-              }
-            }
           }
         });
 
@@ -252,16 +149,7 @@ export class ClaudeSubprocess extends EventEmitter {
       "--model",
       options.model, // Model alias (opus/sonnet/haiku)
       "--dangerously-skip-permissions", // Allow CLI to execute tools (bash, file ops, etc.)
-      // Session persistence enabled (no --no-session-persistence)
     ];
-
-    // Session handling: --resume for continuing, --session-id for new conversations
-    // These must come BEFORE the -- end-of-flags marker
-    if (options.resumeSessionId) {
-      args.push("--resume", options.resumeSessionId);
-    } else if (options.sessionId) {
-      args.push("--session-id", options.sessionId);
-    }
 
     // Pass system prompt as a native CLI flag (proper role separation)
     if (options.systemPrompt) {

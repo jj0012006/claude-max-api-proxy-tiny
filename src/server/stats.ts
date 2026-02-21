@@ -1,7 +1,7 @@
 /**
  * In-memory statistics collector
  *
- * Tracks request counts, routing decisions, and errors.
+ * Tracks request counts and uptime.
  * Stats are lost on process restart (by design — lightweight).
  */
 
@@ -9,35 +9,14 @@ export interface Stats {
   uptimeSeconds: number;
   uptimeHuman: string;
   totalRequests: number;
-  claudeRequests: number;
-  geminiRequests: number;
-  routerErrors: number;
-  routerFallbacks: number;
 }
 
 class StatsCollector {
   private startTime = Date.now();
   private totalRequests = 0;
-  private claudeRequests = 0;
-  private geminiRequests = 0;
-  private routerErrors = 0;
-  private routerFallbacks = 0;
 
-  recordRequest(provider: "claude" | "gemini"): void {
+  recordRequest(): void {
     this.totalRequests++;
-    if (provider === "claude") {
-      this.claudeRequests++;
-    } else {
-      this.geminiRequests++;
-    }
-  }
-
-  recordRouterError(): void {
-    this.routerErrors++;
-  }
-
-  recordRouterFallback(): void {
-    this.routerFallbacks++;
   }
 
   getStats(): Stats {
@@ -57,10 +36,6 @@ class StatsCollector {
       uptimeSeconds,
       uptimeHuman: parts.join(" "),
       totalRequests: this.totalRequests,
-      claudeRequests: this.claudeRequests,
-      geminiRequests: this.geminiRequests,
-      routerErrors: this.routerErrors,
-      routerFallbacks: this.routerFallbacks,
     };
   }
 }

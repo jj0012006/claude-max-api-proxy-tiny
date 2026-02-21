@@ -1,6 +1,4 @@
-# Contributing to Claude Code CLI Provider
-
-Thank you for your interest in contributing!
+# Contributing to Claude Max API Proxy
 
 ## Development Setup
 
@@ -8,6 +6,19 @@ Thank you for your interest in contributing!
 2. Install dependencies: `npm install`
 3. Build: `npm run build`
 4. Run: `node dist/server/standalone.js`
+
+## Project Structure
+
+```
+src/
+├── config.ts          # Environment config
+├── index.ts           # OpenClaw plugin exports
+├── types/             # TypeScript type definitions
+├── adapter/           # OpenAI <-> CLI format conversion
+├── subprocess/        # Claude CLI subprocess lifecycle
+├── session/           # Session ID mapping and persistence
+└── server/            # Express server, routes, dashboard
+```
 
 ## Making Changes
 
@@ -41,6 +52,9 @@ curl -X POST http://localhost:3456/v1/chat/completions \
 curl -N -X POST http://localhost:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-haiku-4", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
+
+# Check dashboard
+open http://localhost:3456/dashboard
 ```
 
 ## Reporting Issues

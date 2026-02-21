@@ -16,48 +16,10 @@ import {
   cliResultToOpenai,
   createDoneChunk,
 } from "../adapter/cli-to-openai.js";
-import { sessionManager } from "../session/manager.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent, ClaudeCliMessage } from "../types/claude-cli.js";
 import { isMessageStart, isContentBlockStart } from "../types/claude-cli.js";
-import { routeRequest, getExplicitProvider } from "../router/index.js";
 import { statsCollector } from "./stats.js";
-import { handleGeminiStreaming, handleGeminiNonStreaming } from "../provider/gemini.js";
-import { extractLatestUserMessage } from "../adapter/openai-to-cli.js";
-import { resolvePersona } from "../bot/config.js";
-
-/**
- * Strip OpenClaw metadata prefix from user messages.
- *
- * OpenClaw wraps user messages with metadata blocks (Conversation info, Sender info)
- * as ```json fenced code blocks. Discord messages may have multiple blocks.
- * We strip ALL metadata blocks and extract only the actual user message.
- */
-function stripOpenClawMetadata(text: string): string {
-  // Remove all ```json...``` blocks and their preceding labels
-  const stripped = text.replace(/[^\n]*\(untrusted metadata\):\s*```json[\s\S]*?```\s*/g, "");
-  return stripped.trim() || text;
-}
-
-/**
- * Extract channel/conversation identifier from OpenClaw metadata.
- * Looks for "channel id:XXXXX" in Conversation info metadata.
- * Falls back to body.user if no metadata match.
- */
-function extractChannelId(messages: OpenAIChatRequest["messages"], fallback: string): string {
-  // Search ALL user messages for channel ID in metadata (may be in first message, not last)
-  for (const msg of messages) {
-    if (msg.role !== "user") continue;
-    const content = typeof msg.content === "string"
-      ? msg.content
-      : Array.isArray(msg.content)
-        ? msg.content.map(p => (p as { text?: string }).text || "").join("")
-        : "";
-    const channelMatch = content.match(/channel id:(\d+)/);
-    if (channelMatch) return channelMatch[1];
-  }
-  return fallback;
-}
 
 /**
  * Handle POST /v1/chat/completions
@@ -85,87 +47,22 @@ export async function handleChatCompletions(
       return;
     }
 
-    const { messages, tools, ...topFields } = body as unknown as Record<string, unknown>;
-    console.error(`[Request] Top fields: ${JSON.stringify(topFields)}`);
-    console.error(`[Request] messages count: ${Array.isArray(messages) ? (messages as unknown[]).length : 0}, tools count: ${Array.isArray(tools) ? (tools as unknown[]).length : 0}`);
-    // DEBUG: log first user message to see full metadata format
-    const firstUserMsg = body.messages.find(m => m.role === "user");
-    if (firstUserMsg) {
-      const content = typeof firstUserMsg.content === "string" ? firstUserMsg.content : JSON.stringify(firstUserMsg.content);
-      console.error(`[Debug] First user message (500 chars): ${content.slice(0, 500)}`);
-    }
-
-    // --- Resolve persona BEFORE routing ---
-    const channelId = extractChannelId(body.messages, body.user || "");
-    const persona = resolvePersona(channelId);
-    if (persona.id !== "default") {
-      console.error(`[Route] Persona: ${persona.id} (${persona.name}), channel: ${channelId}`);
-    }
-
-    // --- Routing: decide which provider handles this request ---
-    const explicitProvider = getExplicitProvider(body.model);
-    let provider = explicitProvider;
-
-    if (!provider) {
-      // Persona bots always use Claude (they need tools and custom system prompts)
-      if (persona.id !== "default") {
-        provider = "claude";
-        console.error(`[Router] Forced claude for persona: ${persona.id}`);
-      } else {
-        // model is "auto" or unrecognized — use intelligent routing
-        const latestMsg = extractLatestUserMessage(body.messages);
-        provider = await routeRequest(stripOpenClawMetadata(latestMsg));
-      }
-    }
-
-    // --- Gemini path ---
-    if (provider === "gemini") {
-      statsCollector.recordRequest("gemini");
-      console.error(`[Route] → Gemini (model: ${body.model})`);
-      if (stream) {
-        await handleGeminiStreaming(res, body.messages, body.model, requestId);
-      } else {
-        await handleGeminiNonStreaming(res, body.messages, body.model, requestId);
-      }
-      return;
-    }
-
-    // --- Claude path (existing flow) ---
-    statsCollector.recordRequest("claude");
+    statsCollector.recordRequest();
     console.error(`[Route] → Claude (model: ${body.model})`);
 
-    // Session persistence: namespace conversationId by persona
-    const rawConversationId = body.user || channelId || requestId;
-    const conversationId = persona.id !== "default"
-      ? `${persona.id}:${rawConversationId}`
-      : rawConversationId;
-    const existingSession = sessionManager.get(conversationId);
-    const hasExistingSession = !!existingSession;
-    const resumeSessionId = existingSession?.claudeSessionId;
-
-    // Convert to CLI input format (uses hasExistingSession to decide prompt strategy)
-    const cliInput = openaiToCli(body, hasExistingSession, persona);
+    // Convert to CLI input format
+    const cliInput = openaiToCli(body);
     const subprocess = new ClaudeSubprocess();
-
-    const claudeSessionId = sessionManager.getOrCreate(conversationId, cliInput.model);
-    sessionManager.incrementMessageCount(conversationId);
-
-    // Build subprocess options with session, system prompt, and persona workspace
-    const personaCwd = ClaudeSubprocess.getStableCwd(persona.id);
-    await ClaudeSubprocess.ensureCwd(personaCwd, persona.claudeMd);
 
     const subprocessOpts: SubprocessOptions = {
       model: cliInput.model,
-      sessionId: claudeSessionId,
-      resumeSessionId,
       systemPrompt: cliInput.systemPrompt,
-      cwd: personaCwd,
     };
 
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, subprocessOpts, cliInput.prompt, requestId, conversationId);
+      await handleStreamingResponse(req, res, subprocess, subprocessOpts, cliInput.prompt, requestId);
     } else {
-      await handleNonStreamingResponse(res, subprocess, subprocessOpts, cliInput.prompt, requestId, conversationId);
+      await handleNonStreamingResponse(res, subprocess, subprocessOpts, cliInput.prompt, requestId);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -307,8 +204,7 @@ async function handleStreamingResponse(
   subprocess: ClaudeSubprocess,
   options: SubprocessOptions,
   prompt: string,
-  requestId: string,
-  conversationId: string
+  requestId: string
 ): Promise<void> {
   // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -344,12 +240,6 @@ async function handleStreamingResponse(
       }
       progressReporter.cleanup();
       resolve();
-    });
-
-    // Handle resume failure — invalidate the bad session
-    subprocess.on("resume_failed", (_sessionId: string) => {
-      console.error(`[Streaming] Resume failed, invalidating session for: ${conversationId}`);
-      sessionManager.invalidate(conversationId);
     });
 
     // Track message_start events (each one = new turn)
@@ -478,17 +368,10 @@ async function handleNonStreamingResponse(
   subprocess: ClaudeSubprocess,
   options: SubprocessOptions,
   prompt: string,
-  requestId: string,
-  conversationId: string
+  requestId: string
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
-
-    // Handle resume failure
-    subprocess.on("resume_failed", (_sessionId: string) => {
-      console.error(`[NonStreaming] Resume failed, invalidating session for: ${conversationId}`);
-      sessionManager.invalidate(conversationId);
-    });
 
     subprocess.on("result", (result: ClaudeCliResult) => {
       finalResult = result;
@@ -567,24 +450,6 @@ export function handleModels(_req: Request, res: Response): void {
         id: "claude-haiku-4",
         object: "model",
         owned_by: "anthropic",
-        created: Math.floor(Date.now() / 1000),
-      },
-      {
-        id: "gemini-pro",
-        object: "model",
-        owned_by: "google",
-        created: Math.floor(Date.now() / 1000),
-      },
-      {
-        id: "gemini-flash",
-        object: "model",
-        owned_by: "google",
-        created: Math.floor(Date.now() / 1000),
-      },
-      {
-        id: "auto",
-        object: "model",
-        owned_by: "proxy",
         created: Math.floor(Date.now() / 1000),
       },
     ],

@@ -1,8 +1,16 @@
-# Claude Max API Proxy
+# Claude Max API Proxy v2
 
 **Use your Claude Max subscription ($200/month) with any OpenAI-compatible client — no separate API costs!**
 
-Multi-model AI proxy that routes requests between Claude (via Claude Code CLI) and Gemini (via LiteLLM), with intelligent routing, persistent memory, and session management.
+A focused Claude CLI bridge that converts OpenAI API requests into Claude Code CLI subprocess calls. Works with OpenClaw's multi-agent system for per-channel persona routing.
+
+## v2 Changes (from v1)
+
+- **Removed**: LiteLLM dependency, Gemini provider, intelligent routing from proxy
+- **Added**: Multi-bot persona system with per-channel workspace isolation
+- **Added**: Gemini as OpenClaw native provider — Gemini agents can use all OpenClaw tools (Bash, WebSearch, Read, Write, etc.)
+- **Simplified**: Proxy now focuses solely on OpenAI API <-> Claude CLI conversion
+- **Routing**: Moved from proxy-level (message classifier) to OpenClaw-level (agent bindings)
 
 ## Why This Exists
 
@@ -17,48 +25,48 @@ Anthropic blocks OAuth tokens from being used directly with third-party API clie
 ## How It Works
 
 ```
-Telegram / Slack / Any Client
+Telegram / Slack / Discord / Any Client
          |
          v
   OpenClaw Gateway (:18789)
-         |  OpenAI /v1/chat/completions
-         v
-  Claude Max API Proxy (:3456)
+    - Multi-agent routing (bindings)
+    - Each channel -> specific agent
+    - Agent -> model + provider
          |
     +----+----+
     |         |
     v         v
-  Claude    Gemini
-  (CLI)     (LiteLLM :4000)
+  Claude    Gemini (native)
+  agents    agents
     |         |
     v         v
- Anthropic  Google AI
-   API       API
-```
-
-### Request Routing
-
-```
-Request → model field check
-  |- model contains "gemini"  → Gemini (via LiteLLM)
-  |- model contains "claude"  → Claude (via CLI subprocess)
-  |- model = "auto"           → Gemini Flash classifier → Claude or Gemini
-  '- other                    → Claude (default)
+  Proxy     Google AI API
+  (:3456)   (direct, with OpenClaw tools)
+    |
+    v
+  Claude Code CLI (subprocess)
+    - --print --output-format stream-json
+    - --dangerously-skip-permissions
+    - --session-id / --resume
+    |
+    v
+  Anthropic API (via Max subscription)
+    - Opus 4 / Sonnet 4 / Haiku 4
 ```
 
 ## Features
 
 - **OpenAI-compatible API** — Works with any client that supports OpenAI's API format
-- **Multi-model routing** — Claude + Gemini with intelligent automatic routing
 - **Streaming support** — Real-time SSE streaming with Smart Turn Buffering
 - **Session persistence** — Multi-turn conversations via `--resume` / `--session-id`
-- **Persistent memory** — CLAUDE.md + memory/ files for personalized responses
-- **Tool execution** — Full CLI tool access (Bash, Read, Write, WebFetch, etc.)
+- **Tool execution** — Full CLI tool access (Bash, Read, Write, WebFetch, WebSearch, etc.)
 - **Voice support** — Audio transcription via Groq Whisper
 - **YouTube analysis** — Video content analysis via yt-dlp
 - **Telegram progress** — Live tool execution updates in Telegram chats
 - **Activity timeout** — Auto-kill after 10 minutes of inactivity
-- **Model tags** — Response suffix shows which model answered (Claude / Gemini)
+- **Gemini native tools** — Gemini agents run natively in OpenClaw with full tool access (Bash, WebSearch, etc.)
+- **Model tags** — Response suffix shows which model answered (🟣 Claude)
+- **Monitoring dashboard** — `/dashboard` with auto-refreshing component status
 - **Secure by design** — Uses spawn() to prevent shell injection
 
 ## Prerequisites
@@ -69,10 +77,7 @@ Request → model field check
    npm install -g @anthropic-ai/claude-code
    claude auth login
    ```
-3. **(Optional) LiteLLM** for Gemini support:
-   ```bash
-   pip install 'litellm[proxy]'
-   ```
+3. **Node.js** >= 20
 
 ## Installation
 
@@ -94,12 +99,6 @@ node dist/server/standalone.js
 
 The server runs at `http://localhost:3456` by default.
 
-### (Optional) Start LiteLLM for Gemini
-
-```bash
-litellm --config litellm-config.yaml --port 4000
-```
-
 ### Test it
 
 ```bash
@@ -109,20 +108,10 @@ curl http://localhost:3456/health
 # List models
 curl http://localhost:3456/v1/models
 
-# Chat completion — Claude (explicit)
+# Chat completion
 curl -X POST http://localhost:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "Hello!"}]}'
-
-# Chat completion — Gemini (explicit)
-curl -X POST http://localhost:3456/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gemini-pro", "messages": [{"role": "user", "content": "Translate hello to French"}]}'
-
-# Chat completion — Auto routing
-curl -X POST http://localhost:3456/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "auto", "messages": [{"role": "user", "content": "Write a Python function"}]}'
 
 # Streaming
 curl -N -X POST http://localhost:3456/v1/chat/completions \
@@ -137,161 +126,140 @@ curl -N -X POST http://localhost:3456/v1/chat/completions \
 | `/health` | GET | Health check |
 | `/v1/models` | GET | List available models |
 | `/v1/chat/completions` | POST | Chat completions (streaming & non-streaming) |
+| `/dashboard` | GET | Monitoring dashboard |
+| `/api/status` | GET | JSON status of all components |
 
 ## Available Models
 
-| Model ID | Provider | Description |
-|----------|----------|-------------|
-| `claude-opus-4` | Claude | Claude Opus 4 (via CLI) |
-| `claude-sonnet-4` | Claude | Claude Sonnet 4 (via CLI) |
-| `claude-haiku-4` | Claude | Claude Haiku 4 (via CLI) |
-| `gemini-pro` | Gemini | Gemini Pro (via LiteLLM) |
-| `gemini-flash` | Gemini | Gemini Flash (via LiteLLM) |
-| `auto` | Router | Intelligent routing — Gemini Flash classifies the task |
+| Model ID | Description |
+|----------|-------------|
+| `claude-opus-4` | Claude Opus 4 (via CLI) |
+| `claude-sonnet-4` | Claude Sonnet 4 (via CLI) |
+| `claude-haiku-4` | Claude Haiku 4 (via CLI) |
+
+Model aliases with provider prefixes are also supported: `claude-max/claude-sonnet-4`, `maxproxy/claude-opus-4`, etc.
+
+## Workspace & Memory
+
+The proxy itself **does not** manage workspaces, CLAUDE.md files, or memory directories. These are managed by OpenClaw at the agent level:
+
+- Each OpenClaw agent has its own workspace directory (`~/.openclaw/workspaces/{agent-id}/`)
+- Claude CLI automatically reads `CLAUDE.md` from its working directory
+- Per-agent `CLAUDE.md` contains persona instructions and memory guidance
+- `memory/` subdirectory holds persistent context files read/written by the agent
+
+To customize an agent's behavior, edit its CLAUDE.md directly:
+```bash
+vim ~/.openclaw/workspaces/kol-scout/CLAUDE.md
+```
+
+A migration script (`migrate-claude-md.sh`) is provided to bootstrap CLAUDE.md files for each agent workspace.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3456` | Proxy server port |
-| `LITELLM_BASE_URL` | `http://127.0.0.1:4000` | LiteLLM base URL for Gemini access |
-| `ROUTER_MODEL` | `gemini-flash` | Model used for routing decisions |
-| `ROUTER_ENABLED` | `true` | Enable intelligent routing (`false` = all to Claude) |
-| `GEMINI_DEFAULT_MODEL` | `gemini-pro` | Default Gemini model when router picks Gemini |
-| `PROXY_CWD` | `~/.openclaw/workspace` | Working directory for CLI subprocesses |
+| `PROXY_CWD` | Current directory | Default working directory for CLI subprocesses |
 
 ## Architecture
 
 ```
 src/
-├── config.ts                # Centralized environment config
-├── index.ts                 # Package exports (Clawdbot plugin)
+├── config.ts                # Environment config (openclawBaseUrl)
+├── index.ts                 # Package exports (OpenClaw plugin)
 ├── types/
 │   ├── claude-cli.ts        # Claude CLI JSON stream types + helpers
 │   └── openai.ts            # OpenAI API request/response types
 ├── adapter/
 │   ├── openai-to-cli.ts     # OpenAI → CLI format (prompt, system prompt, model)
 │   └── cli-to-openai.ts     # CLI → OpenAI format (result, streaming chunks)
-├── router/
-│   └── index.ts             # Intelligent router (Gemini Flash classifier)
-├── provider/
-│   └── gemini.ts            # Gemini provider (streaming + non-streaming via LiteLLM)
 ├── subprocess/
-│   └── manager.ts           # Claude CLI subprocess lifecycle + memory bootstrap
+│   └── manager.ts           # Claude CLI subprocess lifecycle
 ├── session/
 │   └── manager.ts           # Session ID mapping, persistence, resume
 └── server/
     ├── index.ts             # Express server setup
     ├── routes.ts            # Route handlers + Smart Turn Buffering + Telegram progress
+    ├── stats.ts             # Request statistics collector
+    ├── dashboard.ts         # Monitoring dashboard (HTML + API)
     └── standalone.ts        # Standalone entry point
 ```
 
-### Component Overview
-
-#### Intelligent Router (`src/router/index.ts`)
-
-Uses Gemini Flash (via LiteLLM) to classify incoming requests when `model=auto`. Routes coding/tool tasks to Claude, and math/translation/Q&A to Gemini. Falls back to Claude on any error or timeout (15s).
-
-#### Gemini Provider (`src/provider/gemini.ts`)
-
-Forwards requests to Gemini models through LiteLLM's OpenAI-compatible API. Supports both SSE streaming and non-streaming responses.
-
-#### Adapters (`src/adapter/`)
-
-Bidirectional format conversion:
-- **openai-to-cli**: Extracts system prompt, converts messages to CLI prompt, cleans XML tool patterns from assistant messages, injects CLI tool instructions + memory system prompt
-- **cli-to-openai**: Converts CLI result/stream events to OpenAI response format
-
-#### Subprocess Manager (`src/subprocess/manager.ts`)
-
-Manages Claude CLI lifecycle:
-- Spawns `claude --print --output-format stream-json` subprocesses
-- Activity-based timeout (10 min no output → kill)
-- Resume failure detection (stderr keyword scanning)
-- Bootstraps CLAUDE.md + memory/ directory on first run
-
-#### Session Manager (`src/session/manager.ts`)
-
-Maps conversation IDs to Claude CLI session UUIDs:
-- `--session-id` for new conversations
-- `--resume` for continuing existing sessions
-- Auto-invalidation on resume failure
-- 24-hour TTL with periodic cleanup
-
-#### Smart Turn Buffering (`src/server/routes.ts`)
-
-Claude CLI executes multiple "turns" when using tools. Each turn produces streaming content. The proxy buffers all content and only forwards the **last turn** to the client, preventing intermediate tool output from leaking.
-
-#### Persistent Memory (`CLAUDE.md` + `memory/`)
-
-Each subprocess runs in a stable working directory (`~/.openclaw/workspace`) with:
-- `CLAUDE.md` — Instructions for the CLI to read memory files on startup
-- `memory/user-profile.md` — Facts about the user
-- `memory/preferences.md` — Communication style, tools
-- `memory/knowledge-log.md` — Insights, decisions, patterns
-- `memory/projects.md` — Active work context
-
-The CLI reads CLAUDE.md automatically and updates memory files over time.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed component documentation.
 
 ## Deployment
 
 ### With pm2 (recommended)
 
 ```bash
-# Build
 npm run build
-
-# Start proxy
 pm2 start dist/server/standalone.js --name claude-proxy
-
-# (Optional) Start LiteLLM for Gemini
-pm2 start $(which litellm) --name litellm --interpreter none -- --config /path/to/litellm-config.yaml --port 4000
 ```
 
 ### Deploy updates
 
 ```bash
-# On local machine: sync dist/ to server
-rsync -avz dist/ user@server:/path/to/claude-max-api-proxy/dist/
+# On local: pack source
+tar czf /tmp/proxy-v2.tar.gz --exclude=node_modules --exclude=dist --exclude=.git .
 
-# On server: restart
+# Transfer to server
+scp /tmp/proxy-v2.tar.gz user@server:/tmp/
+
+# On server: extract, build, restart
+cd ~/claude-max-api-proxy
+tar xzf /tmp/proxy-v2.tar.gz
+npm install && npm run build
 pm2 restart claude-proxy
 ```
 
-## Security
+## Integration with OpenClaw
 
-- Uses Node.js `spawn()` instead of shell execution to prevent injection attacks
-- No API keys stored or transmitted by this proxy
-- All Claude authentication handled by CLI's secure keychain storage
-- Prompts passed as CLI arguments, not through shell interpretation
-- `--dangerously-skip-permissions` enables full tool access (required for CLI tools)
+### Multi-Agent Setup
 
-## Configuration with Popular Tools
-
-### OpenClaw Gateway
-
-Set model in `~/.openclaw/openclaw.json`:
-```json
-{
-  "model": "claude-max/auto"
-}
-```
-
-Use `claude-max/auto` for intelligent routing, or `claude-max/claude-sonnet-4` for a specific model.
-
-### Continue.dev
+In `~/.openclaw/openclaw.json`, configure providers (Claude via Proxy + Gemini native) and set up agent bindings:
 
 ```json
 {
-  "models": [{
-    "title": "Claude (Max)",
-    "provider": "openai",
-    "model": "claude-opus-4",
-    "apiBase": "http://localhost:3456/v1",
-    "apiKey": "not-needed"
-  }]
+  "models": {
+    "providers": {
+      "claude-max": {
+        "baseUrl": "http://127.0.0.1:3456/v1/",
+        "api": "openai-completions",
+        "models": [
+          { "id": "claude-opus-4", "name": "Claude Opus 4" },
+          { "id": "claude-sonnet-4", "name": "Claude Sonnet 4" },
+          { "id": "claude-haiku-4", "name": "Claude Haiku 4" }
+        ]
+      },
+      "google": {
+        "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "apiKey": "${GEMINI_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash" },
+          { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro" }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "list": [
+      { "id": "kol-scout", "model": { "primary": "claude-max/claude-opus-4" } },
+      { "id": "ai-news", "model": { "primary": "claude-max/claude-sonnet-4" } },
+      { "id": "general", "model": { "primary": "claude-max/claude-sonnet-4" } },
+      { "id": "gemini-qa", "model": { "primary": "google/gemini-2.5-flash" } }
+    ]
+  },
+  "bindings": [
+    { "agentId": "kol-scout", "match": { "channel": "discord", "peer": { "kind": "channel", "id": "CHANNEL_ID" } } },
+    { "agentId": "gemini-qa", "match": { "channel": "discord", "peer": { "kind": "channel", "id": "QUICK_QA_CHANNEL_ID" } } },
+    { "agentId": "general", "match": { "channel": "telegram" } }
+  ]
 }
 ```
+
+Gemini agents configured as native OpenClaw providers automatically get access to all OpenClaw tools (Bash, Read, Write, WebSearch, WebFetch, etc.) — no proxy needed. Claude agents route through the proxy to use the Max subscription.
 
 ### Generic OpenAI Client (Python)
 
@@ -304,24 +272,20 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="auto",
+    model="claude-sonnet-4",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 ```
 
+## Security
+
+- Uses Node.js `spawn()` instead of shell execution to prevent injection attacks
+- No API keys stored or transmitted by this proxy
+- All Claude authentication handled by CLI's secure keychain storage
+- Prompts passed as CLI arguments, not through shell interpretation
+- `--dangerously-skip-permissions` enables full tool access (required for CLI tools)
+
 ## Troubleshooting
-
-### All requests route to Claude (router not working)
-
-Check that LiteLLM is running:
-```bash
-curl http://127.0.0.1:4000/health
-```
-
-If not running, start it:
-```bash
-litellm --config litellm-config.yaml --port 4000
-```
 
 ### "Claude CLI not found"
 
@@ -340,9 +304,11 @@ curl -N -X POST http://localhost:3456/v1/chat/completions ...
 
 ### "--dangerously-skip-permissions cannot be used with root"
 
-The proxy must run as a non-root user. Use a dedicated user (e.g., `claude-proxy`) and grant file access via ACL:
+The proxy must run as a non-root user. Use a dedicated user (e.g., `claude-proxy`):
 ```bash
-setfacl -m u:claude-proxy:rx /path/to/needed/dirs
+useradd -m -s /bin/bash claude-proxy
+su - claude-proxy
+claude auth login
 ```
 
 ## License

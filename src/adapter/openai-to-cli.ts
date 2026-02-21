@@ -6,16 +6,12 @@ import type {
   OpenAIChatRequest,
   OpenAIContentPart,
 } from "../types/openai.js";
-import type { BotPersona } from "../bot/config.js";
-
 export type ClaudeModel = "opus" | "sonnet" | "haiku";
 
 export interface CliInput {
   prompt: string;
   systemPrompt?: string;
   model: ClaudeModel;
-  sessionId?: string;
-  isResuming: boolean;
 }
 
 const MODEL_MAP: Record<string, ClaudeModel> = {
@@ -154,129 +150,6 @@ export function cleanAssistantContent(text: string): string {
   return cleaned.trim();
 }
 
-/**
- * Extract the latest user message text from the messages array.
- * Used when resuming an existing session (we only need the new message).
- */
-export function extractLatestUserMessage(
-  messages: OpenAIChatRequest["messages"]
-): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") {
-      return extractTextContent(messages[i].content);
-    }
-  }
-  return "";
-}
-
-/**
- * Built-in CLI tool instructions.
- * Tells the model how to use CLI native tools (bash, file ops, etc.)
- * and how to handle voice/audio messages via Groq Whisper.
- */
-const CLI_TOOL_INSTRUCTION = `
----
-## CLI Native Tools
-
-You are running inside Claude Code CLI with full tool access.
-ALWAYS use the Bash tool to run shell commands. NEVER output shell commands as plain text.
-
-Available native tools: Bash, Read, Write, Edit, Grep, Glob, WebFetch, WebSearch.
-
-## Voice/Audio Message Handling
-
-When you receive a message referencing an audio file (e.g. a .ogg, .mp3, .wav file path),
-you MUST use the Bash tool to transcribe it. NEVER guess or hallucinate what the user said.
-
-Use Groq Whisper API for transcription:
-\`\`\`bash
-curl -s https://api.groq.com/openai/v1/audio/transcriptions \\
-  -H "Authorization: Bearer $GROQ_API_KEY" \\
-  -F "file=@/path/to/audio.ogg" \\
-  -F "model=whisper-large-v3-turbo" \\
-  -F "response_format=text"
-\`\`\`
-
-After transcription, process the text content and respond to the user.
-If $GROQ_API_KEY is not set, inform the user that voice transcription is not configured.
-
-## YouTube / Video Analysis
-
-When the user sends a YouTube or video URL, use yt-dlp to extract subtitles and analyze the content.
-NEVER try to use WebFetch on YouTube video pages — it won't work. Always use yt-dlp.
-
-Step 1 — Download auto-generated subtitles:
-\`\`\`bash
-yt-dlp --write-auto-sub --sub-lang zh,en --skip-download --sub-format vtt -o "/tmp/%(id)s" "VIDEO_URL"
-\`\`\`
-
-Step 2 — Read the subtitle file:
-\`\`\`bash
-cat /tmp/VIDEO_ID.zh.vtt || cat /tmp/VIDEO_ID.en.vtt
-\`\`\`
-
-Step 3 — Summarize the content for the user.
-
-If yt-dlp is not installed, inform the user to install it: pip install yt-dlp
-If no subtitles are available, fall back to downloading audio and transcribing with Groq Whisper:
-\`\`\`bash
-yt-dlp -x --audio-format mp3 -o "/tmp/%(id)s.mp3" "VIDEO_URL"
-curl -s https://api.groq.com/openai/v1/audio/transcriptions \\
-  -H "Authorization: Bearer $GROQ_API_KEY" \\
-  -F "file=@/tmp/VIDEO_ID.mp3" \\
-  -F "model=whisper-large-v3-turbo" \\
-  -F "response_format=text"
-\`\`\`
-
-## Media Delivery
-
-To send any file (image, audio, PDF, etc.) to the user, include a MEDIA: line:
-MEDIA: /absolute/path/to/file
-
-## Response Tags
-
-- [[audio_as_voice]] — Send audio file as Telegram voice message
-- [[reply_to_current]] — Reply in thread
-- HEARTBEAT_OK — Silently acknowledge cron events (no user-visible response)
-
-## Persistent Memory System
-
-You have a persistent memory system in the memory/ directory (relative to your working directory).
-
-### On Every New Conversation
-At the START of each conversation, silently read your memory files to load context:
-1. Read memory/user-profile.md — who this user is, their role, key facts
-2. Read memory/preferences.md — communication style, language, tools they prefer
-3. Read memory/knowledge-log.md — recent insights, decisions, recurring patterns
-4. Read memory/projects.md — active projects, team context, ongoing work
-
-Do this silently using the Read tool. Do NOT mention that you are loading memory.
-Do NOT say "let me check my memory" or similar. Just seamlessly use the context.
-
-### When to Update Memory
-At the END of a conversation (or when you learn something significant), update the relevant
-memory file(s) using the Write or Edit tool. Update silently — do not announce it.
-
-Update memory when you learn:
-- A new fact about the user (name, role, company, team members)
-- A preference (language, communication style, tool choices, coding conventions)
-- A decision or outcome worth remembering
-- A recurring task pattern or workflow
-- A project name, goal, or status change
-
-### Memory File Format
-Each memory file is simple Markdown. Append new entries with a date stamp.
-Keep files concise — summarize, don't dump raw conversation.
-Prune old or irrelevant entries when a file grows beyond ~100 lines.
-
-### Memory Behavior Rules
-- NEVER tell the user you are reading or writing memory unless they specifically ask about it
-- DO reference remembered context naturally: "Since you're working on X..." or "Given your preference for Y..."
-- If memory contradicts what the user says now, trust the current conversation and update memory
-- Memory files may not exist yet — if a Read fails, that's fine, just proceed without it
-- If the user asks what you remember about them, it's OK to summarize your memory
-`.trim();
-
 export interface ConvertedMessages {
   prompt: string;
   systemPrompt?: string;
@@ -290,8 +163,7 @@ export interface ConvertedMessages {
  * All other messages are formatted into the prompt text.
  */
 export function messagesToPrompt(
-  messages: OpenAIChatRequest["messages"],
-  personaPrompt?: string | null
+  messages: OpenAIChatRequest["messages"]
 ): ConvertedMessages {
   const systemParts: string[] = [];
   const promptParts: string[] = [];
@@ -327,16 +199,10 @@ export function messagesToPrompt(
     }
   }
 
-  // Build system prompt: persona prompt + system messages + CLI instructions
-  const parts: string[] = [];
-  if (personaPrompt) {
-    parts.push(`## Bot Persona\n\n${personaPrompt}`);
-  }
-  if (systemParts.length > 0) {
-    parts.push(systemParts.join("\n\n"));
-  }
-  parts.push(CLI_TOOL_INSTRUCTION);
-  const systemPrompt = parts.join("\n\n");
+  // Pass through system messages directly (no extra instructions injected)
+  const systemPrompt = systemParts.length > 0
+    ? systemParts.join("\n\n")
+    : undefined;
 
   return {
     prompt: promptParts.join("\n").trim(),
@@ -346,37 +212,12 @@ export function messagesToPrompt(
 
 /**
  * Convert OpenAI chat request to CLI input format
- *
- * When hasExistingSession is true, we only send the latest user message
- * as the prompt (the CLI already has the conversation context from the session),
- * and we skip the system prompt (already set in the existing session).
  */
-export function openaiToCli(
-  request: OpenAIChatRequest,
-  hasExistingSession: boolean = false,
-  persona?: BotPersona
-): CliInput {
-  const personaPrompt = persona?.systemPrompt || null;
-
-  if (hasExistingSession) {
-    // Resuming an existing session: only send the latest user message
-    const latestMessage = extractLatestUserMessage(request.messages);
-    return {
-      prompt: latestMessage,
-      systemPrompt: undefined, // CLI already has system prompt from session
-      model: extractModel(request.model),
-      sessionId: request.user,
-      isResuming: true,
-    };
-  }
-
-  // New session: send full conversation context with persona prompt
-  const converted = messagesToPrompt(request.messages, personaPrompt);
+export function openaiToCli(request: OpenAIChatRequest): CliInput {
+  const converted = messagesToPrompt(request.messages);
   return {
     prompt: converted.prompt,
     systemPrompt: converted.systemPrompt,
     model: extractModel(request.model),
-    sessionId: request.user,
-    isResuming: false,
   };
 }

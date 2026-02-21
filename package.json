@@ -1,7 +1,7 @@
 {
   "name": "claude-max-api-proxy",
-  "version": "1.0.0",
-  "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server.",
+  "version": "2.0.0",
+  "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server with multi-agent persona support.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
