@@ -204,8 +204,15 @@ export function messagesToPrompt(
     ? systemParts.join("\n\n")
     : undefined;
 
+  const prompt = promptParts.join("\n").trim();
+
+  // Log prompt size for monitoring token consumption
+  console.log(
+    `[prompt-size] messages=${messages.length} system=${systemPrompt?.length ?? 0}chars prompt=${prompt.length}chars`
+  );
+
   return {
-    prompt: promptParts.join("\n").trim(),
+    prompt,
     systemPrompt,
   };
 }

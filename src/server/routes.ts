@@ -232,8 +232,18 @@ async function handleStreamingResponse(
     let currentTurnDeltas: string[] = [];
     let turnCount = 0;
 
+    // SSE keepalive: send comment every 30s to prevent client timeout
+    // during long multi-turn tool execution (Smart Turn Buffering holds
+    // actual content until the last turn, so the client sees no data)
+    const keepaliveInterval = setInterval(() => {
+      if (!isComplete && !res.writableEnded) {
+        res.write(":keepalive\n\n");
+      }
+    }, 30_000);
+
     // Handle actual client disconnect (response stream closed)
     res.on("close", () => {
+      clearInterval(keepaliveInterval);
       if (!isComplete) {
         // Client disconnected before response completed - kill subprocess
         subprocess.kill();
@@ -277,6 +287,7 @@ async function handleStreamingResponse(
 
     subprocess.on("result", (_result: ClaudeCliResult) => {
       isComplete = true;
+      clearInterval(keepaliveInterval);
       if (!res.writableEnded) {
         // Flush the last turn's buffered content to the client
         for (const text of currentTurnDeltas) {
@@ -323,6 +334,7 @@ async function handleStreamingResponse(
     });
 
     subprocess.on("error", (error: Error) => {
+      clearInterval(keepaliveInterval);
       console.error("[Streaming] Error:", error.message);
       if (!res.writableEnded) {
         res.write(
@@ -337,6 +349,7 @@ async function handleStreamingResponse(
     });
 
     subprocess.on("close", (code: number | null) => {
+      clearInterval(keepaliveInterval);
       // Subprocess exited - ensure response is closed
       if (!res.writableEnded) {
         if (code !== 0 && !isComplete) {
