@@ -20,6 +20,16 @@ import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent, ClaudeCliMessage } from "../types/claude-cli.js";
 import { isMessageStart, isContentBlockStart } from "../types/claude-cli.js";
 import { statsCollector } from "./stats.js";
+import { ContextManager } from "../context/index.js";
+
+// Initialize Context Manager (singleton)
+const contextManager = new ContextManager({
+  windowSize: parseInt(process.env.CONTEXT_WINDOW_SIZE || "30", 10),
+  summaryThreshold: parseInt(process.env.CONTEXT_SUMMARY_THRESHOLD || "50", 10),
+  summaryInterval: parseInt(process.env.CONTEXT_SUMMARY_INTERVAL || "50", 10),
+  geminiApiUrl: process.env.GEMINI_API_URL || "http://localhost:18789/v1/chat/completions",
+  geminiModel: process.env.GEMINI_MODEL || "google/gemini-2.5-flash"
+});
 
 /**
  * Handle POST /v1/chat/completions
@@ -34,7 +44,10 @@ export async function handleChatCompletions(
   const body = req.body as OpenAIChatRequest;
   const stream = body.stream === true;
 
-  console.error(`[Route] body.user=${body.user} body keys=${Object.keys(body).join(',')}`);
+  // Generate or extract session ID for context tracking
+  const sessionId = req.headers['x-session-id'] as string || uuidv4();
+
+  console.error(`[Route] session=${sessionId} body.user=${body.user} body keys=${Object.keys(body).join(',')}`);
 
   try {
     // Validate request
@@ -50,10 +63,22 @@ export async function handleChatCompletions(
     }
 
     statsCollector.recordRequest();
+
+    // 【Context Manager】Process context before conversion
+    const contextResult = await contextManager.processContext(sessionId, body.messages);
+    
+    console.error(
+      `[Route] Context processed: ${contextResult.originalTokenCount}→${contextResult.tokenCount} ` +
+      `(${contextResult.savingsPercent}% saved), strategies=${JSON.stringify(contextResult.strategy)}`
+    );
+
+    // Use processed messages instead of original
+    const processedBody = { ...body, messages: contextResult.messages };
+
     console.error(`[Route] → Claude (model: ${body.model})`);
 
-    // Convert to CLI input format
-    const cliInput = openaiToCli(body);
+    // Convert to CLI input format (with processed messages)
+    const cliInput = openaiToCli(processedBody);
     const subprocess = new ClaudeSubprocess();
 
     const subprocessOpts: SubprocessOptions = {
@@ -61,10 +86,16 @@ export async function handleChatCompletions(
       systemPrompt: cliInput.systemPrompt,
     };
 
+    // Set response headers with context info
+    res.setHeader('x-session-id', sessionId);
+    res.setHeader('x-context-tokens', contextResult.tokenCount.toString());
+    res.setHeader('x-context-saved', contextResult.savedTokenCount.toString());
+    res.setHeader('x-context-savings', contextResult.savingsPercent.toString());
+
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, subprocessOpts, cliInput.prompt, requestId);
+      await handleStreamingResponse(req, res, subprocess, subprocessOpts, cliInput.prompt, requestId, contextResult);
     } else {
-      await handleNonStreamingResponse(res, subprocess, subprocessOpts, cliInput.prompt, requestId);
+      await handleNonStreamingResponse(res, subprocess, subprocessOpts, cliInput.prompt, requestId, contextResult);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -200,13 +231,16 @@ class ProgressReporter {
  * is fully received, NOT when the client disconnects. For SSE connections,
  * we use res.on("close") to detect actual client disconnection.
  */
+import type { ContextResult } from "../context/index.js";
+
 async function handleStreamingResponse(
   req: Request,
   res: Response,
   subprocess: ClaudeSubprocess,
   options: SubprocessOptions,
   prompt: string,
-  requestId: string
+  requestId: string,
+  _contextResult?: ContextResult
 ): Promise<void> {
   // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -383,7 +417,8 @@ async function handleNonStreamingResponse(
   subprocess: ClaudeSubprocess,
   options: SubprocessOptions,
   prompt: string,
-  requestId: string
+  requestId: string,
+  _contextResult?: ContextResult
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
