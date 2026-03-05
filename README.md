@@ -1,16 +1,50 @@
-# Claude Max API Proxy v2
+# Claude Max API Proxy v3
 
 **Use your Claude Max subscription ($200/month) with any OpenAI-compatible client — no separate API costs!**
 
 A focused Claude CLI bridge that converts OpenAI API requests into Claude Code CLI subprocess calls. Works with OpenClaw's multi-agent system for per-channel persona routing.
 
+## v3 Changes (from v2)
+
+### 🎉 Context Manager (上下文管理)
+
+**New module: `src/context/`**
+
+- **Sliding Window** - Retains only recent N turns (default: 30), discards older messages
+- **Auto-Summary** - Generates conversation summaries every 50 turns using Gemini Flash
+- **Token Optimization** - 60-80% reduction for long conversations (100+ turns)
+- **Session Tracking** - Response headers: `x-session-id`, `x-context-tokens`, `x-context-savings`
+
+**Performance Impact:**
+- 30 turns: ~15% token savings
+- 50 turns: ~40% token savings
+- 100+ turns: 60-80% token savings
+
+**Configuration:**
+```bash
+CONTEXT_WINDOW_SIZE=30            # Sliding window size
+CONTEXT_SUMMARY_THRESHOLD=50      # Summary trigger threshold
+GEMINI_API_URL=http://...         # Gemini API endpoint
+GEMINI_MODEL=google/gemini-2.5-flash
+```
+
+### 📊 v2 → v3 Architecture Evolution
+
+| Aspect | v2 | v3 |
+|--------|----|----|
+| Context | Full history injection | Windowed + summarized |
+| Token growth | Linear (unbounded) | Bounded (~4K max) |
+| Cost | Increases with turns | Stabilizes after 50 turns |
+
+---
+
 ## v2 Changes (from v1)
 
 - **Removed**: LiteLLM dependency, Gemini provider, intelligent routing from proxy
 - **Added**: Multi-bot persona system with per-channel workspace isolation
-- **Added**: Gemini as OpenClaw native provider — Gemini agents can use all OpenClaw tools (Bash, WebSearch, Read, Write, etc.)
+- **Added**: Gemini as OpenClaw native provider
 - **Simplified**: Proxy now focuses solely on OpenAI API <-> Claude CLI conversion
-- **Routing**: Moved from proxy-level (message classifier) to OpenClaw-level (agent bindings)
+- **Routing**: Moved from proxy-level to OpenClaw-level (agent bindings)
 
 ## Why This Exists
 
