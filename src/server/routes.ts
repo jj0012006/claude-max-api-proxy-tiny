@@ -34,6 +34,8 @@ export async function handleChatCompletions(
   const body = req.body as OpenAIChatRequest;
   const stream = body.stream === true;
 
+  console.error(`[Route] body.user=${body.user} body keys=${Object.keys(body).join(',')}`);
+
   try {
     // Validate request
     if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
