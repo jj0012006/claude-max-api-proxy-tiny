@@ -218,6 +218,19 @@ export function messagesToPrompt(
 }
 
 /**
+ * Extract the latest user message for --resume mode.
+ * Only the new message needs to be sent; CLI loads history from session.
+ */
+export function extractLatestUserMessage(messages: OpenAIChatRequest["messages"]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      return extractTextContent(messages[i].content);
+    }
+  }
+  return "";
+}
+
+/**
  * Convert OpenAI chat request to CLI input format
  */
 export function openaiToCli(request: OpenAIChatRequest): CliInput {

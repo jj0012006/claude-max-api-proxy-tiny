@@ -19,6 +19,8 @@ import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 export interface SubprocessOptions {
   model: ClaudeModel;
   systemPrompt?: string;
+  sessionId?: string;
+  resumeSessionId?: string;
   timeout?: number;
 }
 
@@ -151,8 +153,16 @@ export class ClaudeSubprocess extends EventEmitter {
       "--dangerously-skip-permissions", // Allow CLI to execute tools (bash, file ops, etc.)
     ];
 
+    // Session management: --resume for existing sessions, --session-id for new ones
+    if (options.resumeSessionId) {
+      args.push("--resume", options.resumeSessionId);
+    } else if (options.sessionId) {
+      args.push("--session-id", options.sessionId);
+    }
+
     // Pass system prompt as a native CLI flag (proper role separation)
-    if (options.systemPrompt) {
+    // Not needed on resume — CLI loads it from session state
+    if (options.systemPrompt && !options.resumeSessionId) {
       args.push("--system-prompt", options.systemPrompt);
     }
 
