@@ -1,40 +1,46 @@
-# Claude Max API Proxy v3
+# Claude Max API Proxy v3.1
 
 **Use your Claude Max subscription ($200/month) with any OpenAI-compatible client — no separate API costs!**
 
-A focused Claude CLI bridge that converts OpenAI API requests into Claude Code CLI subprocess calls. Works with OpenClaw's multi-agent system for per-channel persona routing.
+A lightweight Claude CLI bridge that converts OpenAI API requests into Claude Code CLI subprocess calls with session continuity. Works with OpenClaw's multi-agent system for per-channel persona routing.
 
-## v3 Changes (from v2)
+## v3.1 Changes (from v3.0)
 
-### 🎉 Context Manager (上下文管理)
+### 🎉 CLI `--resume` Session Continuity
 
-**New module: `src/context/`**
+**Session Resume Flow:**
 
-- **Sliding Window** - Retains only recent N turns (default: 30), discards older messages
-- **Auto-Summary** - Generates conversation summaries every 50 turns using Gemini Flash
-- **Token Optimization** - 60-80% reduction for long conversations (100+ turns)
-- **Session Tracking** - Response headers: `x-session-id`, `x-context-tokens`, `x-context-savings`
+- **First Request** - Uses `--session-id` to establish CLI session
+- **Follow-up Requests** - Uses `--resume` to send only the latest message
+- **Session ID Derivation** - Auto-generated from system message hash (stable across restarts)
+- **SessionStore** - In-memory CLI session mapping with 24-hour TTL
+- **Fallback Mechanism** - Auto-fallback to full prompt if resume fails
 
-**Performance Impact:**
-- 30 turns: ~15% token savings
-- 50 turns: ~40% token savings
-- 100+ turns: 60-80% token savings
+**Code Simplification:**
+- **Removed Context Manager** - Sliding window and summary compression replaced by `--resume`
+- **Removed Telegram Progress** - Unused feature (`telegram_chat_id` always undefined)
+- **Removed Model Tags** - No longer appending `🟣 model` to responses
 
-**Configuration:**
-```bash
-CONTEXT_WINDOW_SIZE=30            # Sliding window size
-CONTEXT_SUMMARY_THRESHOLD=50      # Summary trigger threshold
-GEMINI_API_URL=http://...         # Gemini API endpoint
-GEMINI_MODEL=google/gemini-2.5-flash
-```
+### 📊 v3.0 → v3.1 Architecture Evolution
 
-### 📊 v2 → v3 Architecture Evolution
+| Aspect | v3.0 | v3.1 |
+|--------|------|------|
+| **Session** | Stateless (full prompt every time) | `--resume` (only new messages) |
+| **Arg Length** | Windowed (~11k tokens) | Resume mode (<1k for follow-ups) |
+| **Context** | Proxy-layer sliding window + summary | CLI native session persistence |
+| **Dependencies** | Gemini Flash (summary generation) | None |
+| **Code Size** | ~950 lines | ~550 lines (-42%) |
 
-| Aspect | v2 | v3 |
-|--------|----|----|
-| Context | Full history injection | Windowed + summarized |
-| Token growth | Linear (unbounded) | Bounded (~4K max) |
-| Cost | Increases with turns | Stabilizes after 50 turns |
+**Impact:**
+- Follow-up request args: ~44K chars → <1K chars
+- No external API dependencies
+- Simpler, more maintainable codebase
+
+---
+
+## v3.0 Changes (from v2)
+
+See [CHANGELOG.md](CHANGELOG.md) for v3.0 details (Context Manager with sliding window and summary compression).
 
 ---
 
