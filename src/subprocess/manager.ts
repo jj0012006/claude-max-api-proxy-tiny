@@ -41,6 +41,7 @@ export class ClaudeSubprocess extends EventEmitter {
   private buffer: string = "";
   private activityTimeoutId: NodeJS.Timeout | null = null;
   private isKilled: boolean = false;
+  private logTextBuffer: string = "";
 
   /**
    * Reset the activity timeout. Called on each stdout data event.
@@ -99,7 +100,6 @@ export class ClaudeSubprocess extends EventEmitter {
         // Parse JSON stream from stdout
         this.process.stdout?.on("data", (chunk: Buffer) => {
           const data = chunk.toString();
-          console.error(`[Subprocess] Received ${data.length} bytes of stdout`);
           // Reset activity timeout on each output
           this.resetActivityTimeout();
           this.buffer += data;
@@ -173,6 +173,19 @@ export class ClaudeSubprocess extends EventEmitter {
   }
 
   /**
+   * Flush accumulated text delta log buffer
+   */
+  private flushLogBuffer(): void {
+    if (this.logTextBuffer) {
+      // Print each line with prefix
+      for (const line of this.logTextBuffer.split("\n")) {
+        if (line.trim()) console.error(`[Subprocess] ${line}`);
+      }
+      this.logTextBuffer = "";
+    }
+  }
+
+  /**
    * Process the buffer and emit parsed messages
    */
   private processBuffer(): void {
@@ -188,12 +201,37 @@ export class ClaudeSubprocess extends EventEmitter {
         this.emit("message", message);
 
         if (isContentDelta(message)) {
-          // Emit content delta for streaming
-          this.emit("content_delta", message as ClaudeCliStreamEvent);
-        } else if (isAssistantMessage(message)) {
-          this.emit("assistant", message);
-        } else if (isResultMessage(message)) {
-          this.emit("result", message);
+          const evt = message as ClaudeCliStreamEvent;
+          const delta = evt.event.delta as Record<string, string> | undefined;
+          const text = delta?.text || delta?.thinking || "";
+          if (text) {
+            this.logTextBuffer += text;
+          }
+          this.emit("content_delta", evt);
+        } else {
+          // Non-delta event: check if it's a block boundary
+          const raw = message as unknown as Record<string, unknown>;
+          if (raw.type === "stream_event") {
+            const evt = raw as unknown as ClaudeCliStreamEvent;
+            if (evt.event.type === "content_block_stop") {
+              // Block ended, flush accumulated text
+              this.flushLogBuffer();
+            } else if (evt.event.type === "content_block_start") {
+              if (evt.event.content_block?.type === "tool_use") {
+                console.error(`[Subprocess] Tool: ${evt.event.content_block.name}`);
+              }
+            }
+          }
+
+          if (isAssistantMessage(message)) {
+            this.flushLogBuffer();
+            this.emit("assistant", message);
+          } else if (isResultMessage(message)) {
+            this.flushLogBuffer();
+            const r = message as ClaudeCliResult;
+            console.error(`[Subprocess] Result: ${r.subtype}, ${r.num_turns} turns, ${r.duration_ms}ms`);
+            this.emit("result", r);
+          }
         }
       } catch {
         // Non-JSON output, emit as raw
