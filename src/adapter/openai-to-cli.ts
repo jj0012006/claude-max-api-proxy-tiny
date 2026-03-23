@@ -156,6 +156,44 @@ export interface ConvertedMessages {
 }
 
 /**
+ * Strip OpenClaw's "## Tooling" section from the system prompt.
+ *
+ * OpenClaw injects a tool list (read, write, exec, sessions_spawn, etc.) into
+ * the system prompt, but the actual execution environment is Claude CLI which
+ * has its own tools (Read, Write, Bash, etc.). The OpenClaw tool names cause
+ * "No such tool available" errors because Claude CLI doesn't recognize them.
+ *
+ * We replace the section with a mapping note so the LLM uses the correct names.
+ */
+function cleanSystemPromptForCli(systemPrompt: string): string {
+  // Match the "## Tooling" section up to the next "##" heading or end
+  const toolingSectionRegex = /## Tooling\n[\s\S]*?(?=\n## |\n---|\Z)/;
+
+  if (!toolingSectionRegex.test(systemPrompt)) {
+    return systemPrompt;
+  }
+
+  const replacement = `## Tooling
+IMPORTANT: You are running inside Claude Code CLI. Use Claude CLI tool names (case-sensitive):
+- Bash: Run shell commands (replaces "exec")
+- Read: Read file contents (replaces "read")
+- Write: Create or overwrite files (replaces "write")
+- Edit: Make precise edits to files (replaces "edit")
+- Glob: Find files by pattern
+- Grep: Search file contents
+- WebSearch: Search the web (replaces "web_search")
+- WebFetch: Fetch URL content (replaces "web_fetch")
+- Agent: Spawn sub-agent (replaces "sessions_spawn")
+
+Tools NOT available in this environment: canvas, nodes, cron, message, gateway,
+sessions_list, sessions_history, sessions_send, subagents, session_status,
+memory_get, memory_search, agents_list, browser.
+If your task requires these tools, complete what you can and report limitations.`;
+
+  return systemPrompt.replace(toolingSectionRegex, replacement);
+}
+
+/**
  * Convert OpenAI messages array to a prompt string and a separate system prompt.
  *
  * System messages are extracted and returned as `systemPrompt` so they can be
@@ -199,9 +237,10 @@ export function messagesToPrompt(
     }
   }
 
-  // Pass through system messages directly (no extra instructions injected)
+  // Clean OpenClaw tool references from system prompt so the LLM uses
+  // Claude CLI's actual tool names instead of getting "No such tool" errors
   const systemPrompt = systemParts.length > 0
-    ? systemParts.join("\n\n")
+    ? cleanSystemPromptForCli(systemParts.join("\n\n"))
     : undefined;
 
   const prompt = promptParts.join("\n").trim();

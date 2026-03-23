@@ -63,7 +63,7 @@ export class ClaudeSubprocess extends EventEmitter {
    * Start the Claude CLI subprocess with the given prompt
    */
   async start(prompt: string, options: SubprocessOptions): Promise<void> {
-    const args = this.buildArgs(prompt, options);
+    const args = this.buildArgs(options);
     const cwd = process.env.PROXY_CWD || process.cwd();
 
     return new Promise((resolve, reject) => {
@@ -92,7 +92,8 @@ export class ClaudeSubprocess extends EventEmitter {
           }
         });
 
-        // Close stdin since we pass prompt as argument
+        // Pass prompt via stdin to avoid E2BIG when prompt is large
+        this.process.stdin?.write(prompt);
         this.process.stdin?.end();
 
         console.error(`[Subprocess] Process spawned with PID: ${this.process.pid}`);
@@ -141,7 +142,7 @@ export class ClaudeSubprocess extends EventEmitter {
   /**
    * Build CLI arguments array
    */
-  private buildArgs(prompt: string, options: SubprocessOptions): string[] {
+  private buildArgs(options: SubprocessOptions): string[] {
     const args = [
       "--print", // Non-interactive mode
       "--output-format",
@@ -166,8 +167,8 @@ export class ClaudeSubprocess extends EventEmitter {
       args.push("--system-prompt", options.systemPrompt);
     }
 
-    // End of flags, start of positional args
-    args.push("--", prompt);
+    // Prompt is passed via stdin (not as positional arg) to avoid E2BIG
+    // Claude CLI reads from stdin when no positional argument is given
 
     return args;
   }

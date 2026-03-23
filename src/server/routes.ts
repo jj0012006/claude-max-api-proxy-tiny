@@ -268,10 +268,19 @@ async function handleStreamingResponse(
     subprocess.on("close", (code: number | null) => {
       clearInterval(keepaliveInterval);
 
-      // Resume failed — clear session so next request uses full context
+      // Resume failed — only clear session on definitive errors (exit code 1/2),
+      // NOT on SIGTERM (143) or activity timeout, since the CLI session file is
+      // still valid and can be resumed. Clearing on timeout causes a cascade:
+      // next request becomes NEW with full context → slow + wastes tokens.
       if (code !== 0 && !isComplete && options.resumeSessionId && proxySessionId) {
-        console.error(`[Streaming] Resume failed (code=${code}), clearing session ${proxySessionId}`);
-        sessionStore.delete(proxySessionId);
+        if (code !== null && code < 128) {
+          // Real error (code 1, 2, etc.) — session is likely corrupt, clear it
+          console.error(`[Streaming] Resume failed (code=${code}), clearing session ${proxySessionId}`);
+          sessionStore.delete(proxySessionId);
+        } else {
+          // Signal kill (143=SIGTERM, 137=SIGKILL) or timeout — keep session for retry
+          console.error(`[Streaming] Resume interrupted (code=${code}), keeping session ${proxySessionId} for retry`);
+        }
       }
 
       if (!res.writableEnded) {
@@ -335,9 +344,11 @@ async function handleNonStreamingResponse(
     });
 
     subprocess.on("close", (code: number | null) => {
-      // Resume failed — clear session
+      // Resume failed — only clear on real errors, not signal kills
       if (code !== 0 && !finalResult && options.resumeSessionId && proxySessionId) {
-        sessionStore.delete(proxySessionId);
+        if (code !== null && code < 128) {
+          sessionStore.delete(proxySessionId);
+        }
       }
 
       if (finalResult) {
