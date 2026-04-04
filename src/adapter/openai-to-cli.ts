@@ -6,6 +6,45 @@ import type {
   OpenAIChatRequest,
   OpenAIContentPart,
 } from "../types/openai.js";
+import { writeFileSync, mkdirSync, existsSync } from "fs";
+import { join } from "path";
+import { randomUUID } from "crypto";
+
+// Temp directory for image files passed to Claude CLI
+const IMAGE_TEMP_DIR = "/tmp/openclaw-images";
+
+/**
+ * Ensure the temp image directory exists.
+ */
+function ensureImageDir(): void {
+  if (!existsSync(IMAGE_TEMP_DIR)) {
+    mkdirSync(IMAGE_TEMP_DIR, { recursive: true, mode: 0o777 });
+  }
+}
+
+/**
+ * Decode a base64 data-URL image and save to a temp file.
+ * Returns the file path on success, null on failure.
+ */
+function saveBase64Image(dataUrl: string): string | null {
+  try {
+    const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/s);
+    if (!match) return null;
+
+    const ext = match[1] === "jpeg" ? "jpg" : match[1];
+    const base64Data = match[2];
+    const filename = `${randomUUID()}.${ext}`;
+    const filepath = join(IMAGE_TEMP_DIR, filename);
+
+    ensureImageDir();
+    writeFileSync(filepath, Buffer.from(base64Data, "base64"));
+    console.log(`[image-save] Saved image to ${filepath} (${base64Data.length} base64 chars)`);
+    return filepath;
+  } catch (err) {
+    console.error("[image-save] Failed to save image:", err);
+    return null;
+  }
+}
 export type ClaudeModel = "opus" | "sonnet" | "haiku";
 
 export interface CliInput {
@@ -75,10 +114,35 @@ function extractTextContent(content: string | OpenAIContentPart[] | null): strin
   }
 
   if (Array.isArray(content)) {
-    return content
-      .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text!)
-      .join("\n");
+    const parts: string[] = [];
+
+    for (const part of content) {
+      if (part.type === "text" && typeof part.text === "string") {
+        parts.push(part.text);
+      } else if (part.type === "image_url" && part.image_url?.url) {
+        const url = part.image_url.url;
+        if (url.startsWith("data:image/")) {
+          // Base64-encoded image: save to temp file for Claude CLI Read tool
+          const filepath = saveBase64Image(url);
+          if (filepath) {
+            parts.push(
+              `[User sent an image. The image file is saved at: ${filepath} \u2014 ` +
+              `use the Read tool to view and analyze it.]`
+            );
+          } else {
+            parts.push("[User sent an image but it could not be decoded.]");
+          }
+        } else {
+          // External URL: let the agent fetch it if needed
+          parts.push(
+            `[User sent an image URL: ${url} \u2014 ` +
+            `use WebFetch to download it if needed.]`
+          );
+        }
+      }
+    }
+
+    return parts.join("\n");
   }
 
   return String(content ?? "");
