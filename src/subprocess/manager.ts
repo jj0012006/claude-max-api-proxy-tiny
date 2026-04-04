@@ -6,6 +6,33 @@
  */
 
 import { spawn, ChildProcess } from "child_process";
+import { readdirSync, unlinkSync, statSync, existsSync } from "fs";
+import { join } from "path";
+
+const IMAGE_TEMP_DIR = "/tmp/openclaw-images";
+const IMAGE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * Remove temp image files older than IMAGE_MAX_AGE_MS.
+ * Called after each subprocess completes.
+ */
+function cleanupOldImages(): void {
+  try {
+    if (!existsSync(IMAGE_TEMP_DIR)) return;
+    const now = Date.now();
+    for (const file of readdirSync(IMAGE_TEMP_DIR)) {
+      const filepath = join(IMAGE_TEMP_DIR, file);
+      try {
+        const stat = statSync(filepath);
+        if (now - stat.mtimeMs > IMAGE_MAX_AGE_MS) {
+          unlinkSync(filepath);
+        }
+      } catch { /* ignore per-file errors */ }
+    }
+  } catch (err) {
+    console.error("[image-cleanup] Error:", err);
+  }
+}
 import { EventEmitter } from "events";
 import type {
   ClaudeCliMessage,
@@ -123,6 +150,8 @@ export class ClaudeSubprocess extends EventEmitter {
         this.process.on("close", (code) => {
           console.error(`[Subprocess] Process closed with code: ${code}`);
           this.clearTimeout();
+          // Clean up old temp images
+          cleanupOldImages();
           // Process any remaining buffer
           if (this.buffer.trim()) {
             this.processBuffer();
