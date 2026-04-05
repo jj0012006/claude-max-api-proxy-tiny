@@ -161,12 +161,28 @@ async function handleStreamingResponse(
     let currentTurnDeltas: string[] = [];
     let turnCount = 0;
 
-    // SSE keepalive every 30s during long tool execution
+    // Send a space as a real SSE data chunk every 15s to keep client alive
+    // SSE comments (:keepalive) may not prevent client-side data timeouts
     const keepaliveInterval = setInterval(() => {
       if (!isComplete && !res.writableEnded) {
-        res.write(":keepalive\n\n");
+        const chunk = {
+          id: `chatcmpl-${requestId}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: lastModel,
+          choices: [{
+            index: 0,
+            delta: {
+              role: isFirst ? "assistant" : undefined,
+              content: " ",
+            },
+            finish_reason: null,
+          }],
+        };
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        isFirst = false;
       }
-    }, 30_000);
+    }, 15_000);
 
     // Handle client disconnect
     res.on("close", () => {
